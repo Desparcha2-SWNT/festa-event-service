@@ -3,7 +3,7 @@ import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { createEventSchema } from './validation.js';
-import { createEvent, findEventById } from './repository.js';
+import { createEvent, findEventById, isMerchantVerified } from './repository.js';
 
 export const eventsRouter = Router();
 
@@ -18,9 +18,20 @@ eventsRouter.post('/', requireAuth, async (req, res, next) => {
   if (!parsed.success) {
     return res.status(400).json({ error: 'cuerpo inválido', issues: z.treeifyError(parsed.error) });
   }
-  // Un usuario normal no puede crear eventos con boletería (eso exige ser merchant verificado).
-  if (parsed.data.organizerType === 'merchant' && req.auth.accountType !== 'merchant') {
-    return res.status(403).json({ error: 'solo un merchant puede crear eventos como merchant' });
+  // Un usuario normal no puede crear eventos como merchant. El claim por sí solo no basta
+  // (auth-service deja autoasignarlo al registrarse): además hace falta que un admin haya
+  // verificado ESE merchantId (proyección de merchant.verified, ver isMerchantVerified).
+  if (parsed.data.organizerType === 'merchant') {
+    if (req.auth.accountType !== 'merchant') {
+      return res.status(403).json({ error: 'solo un merchant puede crear eventos como merchant' });
+    }
+    try {
+      if (!(await isMerchantVerified(parsed.data.merchantId))) {
+        return res.status(403).json({ error: 'el comercio todavía no está verificado' });
+      }
+    } catch (err) {
+      return next(err);
+    }
   }
 
   try {

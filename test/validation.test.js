@@ -3,6 +3,7 @@ import { createEventSchema } from '../src/events/validation.js';
 
 const base = {
   organizerType: 'merchant',
+  merchantId: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
   organizerName: 'Café Bohemio',
   title: 'Noche de jazz',
   description: 'Una noche de jazz en vivo.',
@@ -31,6 +32,13 @@ describe('createEventSchema', () => {
 
   it('rechaza priceCents > 0 si no es ticketed', () => {
     const result = createEventSchema.safeParse({ ...base, ticketed: false, priceCents: 1000 });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza organizerType merchant sin merchantId', () => {
+    const { merchantId, ...withoutMerchantId } = base;
+    void merchantId;
+    const result = createEventSchema.safeParse(withoutMerchantId);
     expect(result.success).toBe(false);
   });
 

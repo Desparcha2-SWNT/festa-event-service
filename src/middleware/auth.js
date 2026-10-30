@@ -15,7 +15,8 @@ export function requireAuth(req, res, next) {
 
   try {
     const claims = jwt.verify(token, publicKey, { algorithms: ['RS256'], issuer: config.jwtIssuer });
-    req.auth = { userId: claims.sub, email: claims.email, accountType: claims.accountType };
+    // auth-service emite el claim "role" (ver TokenService.accessToken), no "accountType".
+    req.auth = { userId: claims.sub, email: claims.email, accountType: claims.role };
     next();
   } catch {
     res.status(401).json({ error: 'token inválido' });

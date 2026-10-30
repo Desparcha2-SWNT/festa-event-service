@@ -1,10 +1,15 @@
-import { randomUUID } from 'node:crypto';
 import { pool } from '../db/pool.js';
 import { logger } from '../logger.js';
 
 /**
  * Publica lo pendiente en `outbox` con publisher confirms (ver contracts/README.md § Publicar).
- * Si falla la confirmación, la fila queda sin `sent_at` y se reintenta en el siguiente tick.
+ *
+ * `FOR UPDATE SKIP LOCKED` evita que dos instancias de este worker (o dos réplicas del
+ * servicio) seleccionen la misma fila. El `eventId`/`correlationId` vienen ya fijados desde
+ * que se creó la fila (ver migrations/002_outbox.sql): si esta transacción se cae después de
+ * publicar pero antes de confirmar el `UPDATE`, el siguiente intento republica con el MISMO
+ * eventId, y el inbox del consumidor lo deduplica por `processed_events` en vez de tratarlo
+ * como un evento nuevo.
  */
 export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
   let stopped = false;
@@ -12,21 +17,23 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
 
   const tick = async () => {
     if (stopped) return;
+    const client = await pool.connect();
     try {
       const channel = await channelPromise;
-      const { rows } = await pool.query(
-        `SELECT id, exchange, routing_key, payload FROM outbox
-         WHERE sent_at IS NULL ORDER BY created_at LIMIT 50`,
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `SELECT id, event_id, correlation_id, exchange, routing_key, payload FROM outbox
+         WHERE sent_at IS NULL ORDER BY created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,
       );
 
       for (const row of rows) {
         const envelope = {
-          eventId: randomUUID(),
+          eventId: row.event_id,
           eventType: row.routing_key,
           version: 1,
           occurredAt: new Date().toISOString(),
           producer: 'event-service',
-          correlationId: randomUUID(),
+          correlationId: row.correlation_id,
           causationId: null,
           data: row.payload,
         };
@@ -42,12 +49,15 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
           );
         });
 
-        await pool.query('UPDATE outbox SET sent_at = now() WHERE id = $1', [row.id]);
+        await client.query('UPDATE outbox SET sent_at = now() WHERE id = $1', [row.id]);
       }
+      await client.query('COMMIT');
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       logger.error(err, 'fallo publicando el outbox, se reintenta en el siguiente tick');
       channelPromise = connection.createConfirmChannel();
     } finally {
+      client.release();
       if (!stopped) setTimeout(tick, intervalMs);
     }
   };

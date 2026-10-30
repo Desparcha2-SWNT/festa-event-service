@@ -36,6 +36,11 @@ export const createEventSchema = z
     message: 'solo un merchant verificado puede vender boletas (ticketed)',
     path: ['ticketed'],
   })
+  .refine((e) => e.organizerType !== 'merchant' || e.merchantId, {
+    // El contrato (event.published.schema.json) dice "Presente si organizerType = merchant".
+    message: 'merchantId es obligatorio cuando organizerType es merchant',
+    path: ['merchantId'],
+  })
   .refine((e) => e.ticketed || e.priceCents === 0, {
     message: 'priceCents debe ser 0 si el evento no es ticketed',
     path: ['priceCents'],

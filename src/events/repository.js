@@ -120,3 +120,14 @@ export async function findEventById(id) {
   );
   return rows[0] ? toApi(rows[0]) : null;
 }
+
+/**
+ * El claim "role: merchant" del JWT solo dice que la cuenta se registró como comercio
+ * (auth-service deja elegirlo al registrarse); no que un admin lo verificó. Esta proyección
+ * (migrations/004_verified_merchants.sql, llenada por el handler de merchant.verified) es la
+ * única fuente confiable de "puede vender boletas".
+ */
+export async function isMerchantVerified(merchantId) {
+  const { rows } = await pool.query('SELECT 1 FROM verified_merchants WHERE merchant_id = $1', [merchantId]);
+  return rows.length > 0;
+}

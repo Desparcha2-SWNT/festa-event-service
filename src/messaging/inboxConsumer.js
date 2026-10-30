@@ -6,9 +6,17 @@ const RETRY_QUEUE = 'event-service.inbox.retry';
 const MAX_RETRIES = 3;
 
 // Se completa a medida que event-service necesite reaccionar a eventos de otros dominios
-// (hoy consume account.deleted de festa.auth, ver contracts/rabbitmq/definitions.json).
+// (hoy también está en rabbitmq/definitions.json account.deleted de festa.auth, pendiente).
 // Cada handler recibe `data` del sobre y el `client` de una transacción ya abierta.
 const handlers = {
+  'merchant.verified': async (data, client) => {
+    await client.query(
+      `INSERT INTO verified_merchants (merchant_id, business_name, verified_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (merchant_id) DO UPDATE SET business_name = EXCLUDED.business_name, verified_at = EXCLUDED.verified_at`,
+      [data.merchantId, data.businessName, data.verifiedAt],
+    );
+  },
   // 'account.deleted': async (data, client) => { ... },
 };
 
@@ -29,7 +37,18 @@ export async function startInboxConsumer(connection) {
 }
 
 async function handle(channel, msg) {
-  const envelope = JSON.parse(msg.content.toString());
+  let envelope;
+  try {
+    envelope = JSON.parse(msg.content.toString());
+    if (!envelope?.eventId || !envelope?.eventType) throw new Error('falta eventId o eventType');
+  } catch (err) {
+    // Dato malformado = error permanente (contracts/README.md § Consumir): directo a la DLQ,
+    // sin reintentos. Si esto no se separa del resto, el mensaje queda sin ack/nack y, con
+    // prefetch 10, el consumidor se atasca después de 10 mensajes corruptos.
+    logger.error({ err }, 'mensaje del inbox inválido (no es el sobre esperado), va directo a la DLQ');
+    return channel.nack(msg, false, false);
+  }
+
   const handler = handlers[envelope.eventType];
 
   if (!handler) {
