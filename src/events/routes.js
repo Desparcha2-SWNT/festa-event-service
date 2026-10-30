@@ -1,10 +1,17 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { createEventSchema } from './validation.js';
 import { createEvent, findEventById } from './repository.js';
 
 export const eventsRouter = Router();
+
+// El gateway (Kong) ya aplica un límite por usuario (300/min, ver festa-gateway/kong.yml.tmpl).
+// Este es un segundo límite, por IP, directamente en el servicio: no depende de que la
+// petición pase por el gateway (defensa en profundidad).
+const limiter = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false });
+eventsRouter.use(limiter);
 
 eventsRouter.post('/', requireAuth, async (req, res, next) => {
   const parsed = createEventSchema.safeParse(req.body);
