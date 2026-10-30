@@ -76,6 +76,13 @@ describe.skipIf(!hasContracts)('schemaRegistry', () => {
     expect(registry.getExpectedProducer('event.published')).toBe('event-service');
     expect(registry.getExpectedProducer('esto.no_existe')).toBeUndefined();
   });
+
+  it('sabe por qué exchange debió llegar cada eventType', () => {
+    expect(registry.getExpectedExchange('merchant.verified')).toBe('festa.user');
+    expect(registry.getExpectedExchange('account.deleted')).toBe('festa.auth');
+    expect(registry.getExpectedExchange('event.published')).toBe('festa.event');
+    expect(registry.getExpectedExchange('esto.no_existe')).toBeUndefined();
+  });
 });
 
 if (!hasContracts) {

@@ -23,16 +23,53 @@ describe('handler merchant.verified', () => {
   });
 });
 
+// Fila completa tal como la devolvería `UPDATE ... RETURNING *, ST_X(...) AS lng, ST_Y(...) AS lat`:
+// lo que toApi() necesita para armar el event.updated.
+function anonymizedRow(overrides = {}) {
+  return {
+    id: 'evt-pasado-1',
+    organizer_id: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f',
+    organizer_type: 'user',
+    merchant_id: null,
+    organizer_name: 'Organizador eliminado',
+    title: 'Picnic en el parque',
+    description: 'Un picnic tranquilo.',
+    description_ai_generated: false,
+    category: 'cultural',
+    tags: [],
+    starts_at: new Date('2026-01-01T10:00:00Z'),
+    ends_at: new Date('2026-01-01T12:00:00Z'),
+    venue_name: 'Parque Simón Bolívar',
+    venue_address: 'Cra. 60 # 63-11, Bogotá',
+    lat: 4.6584,
+    lng: -74.0937,
+    capacity: null,
+    ticketed: false,
+    price_cents: 0,
+    max_tickets_per_order: null,
+    currency: 'COP',
+    featured: false,
+    is_live: false,
+    cover_image_url: null,
+    status: 'expired',
+    version: 2,
+    updated_at: new Date('2026-12-01T10:00:00Z'),
+    ...overrides,
+  };
+}
+
 describe('handler account.deleted', () => {
-  it('cancela los eventos futuros del organizador y publica event.cancelled por cada uno', async () => {
-    const pendingEvent = { id: 'evt-1', title: 'Noche de jazz', version: 2 };
+  it('cancela los eventos futuros, anonimiza versionado (publicando event.updated) y borra el comercio', async () => {
+    const pendingEvent = { id: 'evt-futuro-1', title: 'Noche de jazz', version: 2 };
+    const pastRow = anonymizedRow();
     const client = {
       query: vi
         .fn()
-        .mockResolvedValueOnce({ rows: [pendingEvent] }) // SELECT eventos a cancelar
+        .mockResolvedValueOnce({ rows: [pendingEvent] }) // SELECT eventos futuros a cancelar
         .mockResolvedValueOnce({ rows: [] }) // UPDATE events SET status='cancelled'...
-        .mockResolvedValueOnce({ rows: [] }) // INSERT INTO outbox (enqueue)
-        .mockResolvedValueOnce({ rows: [] }) // UPDATE events SET organizer_name=...
+        .mockResolvedValueOnce({ rows: [] }) // INSERT INTO outbox (event.cancelled)
+        .mockResolvedValueOnce({ rows: [pastRow] }) // UPDATE organizer_name ... RETURNING
+        .mockResolvedValueOnce({ rows: [] }) // INSERT INTO outbox (event.updated)
         .mockResolvedValueOnce({ rows: [] }), // DELETE FROM verified_merchants
     };
     const data = { userId: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f', deletedAt: '2026-12-01T10:00:00Z' };
@@ -40,7 +77,7 @@ describe('handler account.deleted', () => {
 
     await _internal.handlers['account.deleted'](data, client, envelope);
 
-    expect(client.query).toHaveBeenCalledTimes(5);
+    expect(client.query).toHaveBeenCalledTimes(6);
 
     const [selectSql, selectParams] = client.query.mock.calls[0];
     expect(selectSql).toMatch(/SELECT id, title, version FROM events/);
@@ -50,34 +87,64 @@ describe('handler account.deleted', () => {
     expect(cancelSql).toMatch(/UPDATE events SET status = 'cancelled'/);
     expect(cancelParams).toEqual([pendingEvent.id, pendingEvent.version + 1]);
 
-    const [outboxSql, outboxParams] = client.query.mock.calls[2];
-    expect(outboxSql).toMatch(/INSERT INTO outbox/);
-    expect(JSON.parse(outboxParams[2])).toMatchObject({
+    const [cancelOutboxSql, cancelOutboxParams] = client.query.mock.calls[2];
+    expect(cancelOutboxSql).toMatch(/INSERT INTO outbox/);
+    expect(JSON.parse(cancelOutboxParams[2])).toMatchObject({
       eventId: pendingEvent.id,
       organizerId: data.userId,
       title: pendingEvent.title,
       version: pendingEvent.version + 1,
     });
-    // El evento publicado nace de CONSUMIR account.deleted, no de una petición HTTP: lleva
-    // causationId (el eventId de ese mensaje), no correlationId.
-    expect(outboxParams[3]).toBeNull();
-    expect(outboxParams[4]).toBe(envelope.eventId);
+    // Nace de CONSUMIR account.deleted, no de una petición HTTP: lleva causationId, no correlationId.
+    expect(cancelOutboxParams[3]).toBeNull();
+    expect(cancelOutboxParams[4]).toBe(envelope.eventId);
 
     const [anonymizeSql, anonymizeParams] = client.query.mock.calls[3];
-    expect(anonymizeSql).toMatch(/UPDATE events SET organizer_name = 'Organizador eliminado'/);
+    expect(anonymizeSql).toMatch(/UPDATE events SET organizer_name = 'Organizador eliminado', version = version \+ 1/);
+    expect(anonymizeSql).toMatch(/RETURNING/);
     expect(anonymizeParams).toEqual([data.userId]);
 
-    const [deleteMerchantSql, deleteMerchantParams] = client.query.mock.calls[4];
+    const [updatedOutboxSql, updatedOutboxParams] = client.query.mock.calls[4];
+    expect(updatedOutboxSql).toMatch(/INSERT INTO outbox/);
+    const updatedPayload = JSON.parse(updatedOutboxParams[2]);
+    expect(updatedPayload).toMatchObject({
+      eventId: pastRow.id,
+      organizerName: 'Organizador eliminado',
+      version: pastRow.version, // ya viene incrementada por el UPDATE
+    });
+    expect(updatedOutboxParams[4]).toBe(envelope.eventId); // causationId, mismo mensaje causante
+
+    const [deleteMerchantSql, deleteMerchantParams] = client.query.mock.calls[5];
     expect(deleteMerchantSql).toMatch(/DELETE FROM verified_merchants/);
     expect(deleteMerchantParams).toEqual([data.userId]);
   });
 
-  it('igual anonimiza y borra la proyección de comercio aunque no tenga eventos futuros que cancelar', async () => {
+  it('igual anonimiza (versionado) y borra la proyección de comercio aunque no tenga eventos futuros que cancelar', async () => {
+    const row = anonymizedRow({ id: 'evt-pasado-2' });
     const client = {
       query: vi
         .fn()
         .mockResolvedValueOnce({ rows: [] }) // SELECT: nada que cancelar
-        .mockResolvedValueOnce({ rows: [] }) // UPDATE organizer_name
+        .mockResolvedValueOnce({ rows: [row] }) // UPDATE organizer_name ... RETURNING
+        .mockResolvedValueOnce({ rows: [] }) // INSERT INTO outbox (event.updated)
+        .mockResolvedValueOnce({ rows: [] }), // DELETE FROM verified_merchants
+    };
+    const data = { userId: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f', deletedAt: '2026-12-01T10:00:00Z' };
+
+    await _internal.handlers['account.deleted'](data, client, { eventId: 'x' });
+
+    expect(client.query).toHaveBeenCalledTimes(4);
+    expect(client.query.mock.calls[1][0]).toMatch(/RETURNING/);
+    expect(client.query.mock.calls[2][0]).toMatch(/INSERT INTO outbox/);
+    expect(client.query.mock.calls[3][0]).toMatch(/DELETE FROM verified_merchants/);
+  });
+
+  it('no publica event.updated si no hay nada que anonimizar', async () => {
+    const client = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] }) // SELECT: nada que cancelar
+        .mockResolvedValueOnce({ rows: [] }) // UPDATE organizer_name ... RETURNING (ninguna fila)
         .mockResolvedValueOnce({ rows: [] }), // DELETE FROM verified_merchants
     };
     const data = { userId: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f', deletedAt: '2026-12-01T10:00:00Z' };
@@ -85,6 +152,5 @@ describe('handler account.deleted', () => {
     await _internal.handlers['account.deleted'](data, client, { eventId: 'x' });
 
     expect(client.query).toHaveBeenCalledTimes(3);
-    expect(client.query.mock.calls[2][0]).toMatch(/DELETE FROM verified_merchants/);
   });
 });

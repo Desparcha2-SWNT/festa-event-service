@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { getSchemaRegistry } from './schemaRegistry.js';
 import { enqueue } from './outboxRepository.js';
+import { toApi } from '../events/repository.js';
 
 const QUEUE = 'event-service.inbox';
 const RETRY_QUEUE = 'event-service.inbox.retry';
@@ -54,11 +55,24 @@ const handlers = {
       });
     }
 
-    await client.query(
-      `UPDATE events SET organizer_name = 'Organizador eliminado'
-       WHERE organizer_id = $1 AND organizer_name <> 'Organizador eliminado'`,
+    // Versionado y publicado como event.updated (mismo "snapshot completo" que event.published,
+    // ver contracts/events/event/event.updated.schema.json): sin esto, booking/payment/ai/etc.
+    // nunca se enteran del cambio y se quedan con el nombre viejo en su propia copia para
+    // siempre, aunque nuestra BD ya esté anonimizada.
+    const { rows: anonymized } = await client.query(
+      `UPDATE events SET organizer_name = 'Organizador eliminado', version = version + 1, updated_at = now()
+       WHERE organizer_id = $1 AND organizer_name <> 'Organizador eliminado'
+       RETURNING *, ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat`,
       [data.userId],
     );
+    for (const row of anonymized) {
+      await enqueue(client, {
+        exchange: 'festa.event',
+        routingKey: 'event.updated',
+        payload: toApi(row),
+        causationId: envelope.eventId,
+      });
+    }
 
     await client.query('DELETE FROM verified_merchants WHERE user_id = $1', [data.userId]);
   },
@@ -105,15 +119,24 @@ async function handle(channel, msg, registry) {
     return channel.nack(msg, false, false);
   }
 
+  // Capa extra de defensa: hoy todos los servicios comparten un único usuario de RabbitMQ
+  // (ver festa-infra), así que RabbitMQ por sí solo no impide que cualquiera publique un
+  // mensaje bien formado con un `producer`/exchange ajeno. Ninguno de los dos es retryable:
+  // el mensaje nunca va a dejar de estar mal.
   const expectedProducer = registry.getExpectedProducer(envelope.eventType);
   if (expectedProducer && envelope.producer !== expectedProducer) {
-    // Capa extra de defensa: hoy todos los servicios comparten un único usuario de RabbitMQ
-    // (ver festa-infra), así que RabbitMQ por sí solo no impide que cualquiera publique un
-    // mensaje bien formado con un `producer` ajeno. No es retryable: el mensaje nunca va a
-    // dejar de estar mal.
     logger.error(
       { expectedProducer, actual: envelope.producer, eventType: envelope.eventType },
       'el productor declarado no es el dueño de este eventType, va directo a la DLQ',
+    );
+    return channel.nack(msg, false, false);
+  }
+
+  const expectedExchange = registry.getExpectedExchange(envelope.eventType);
+  if (expectedExchange && msg.fields.exchange !== expectedExchange) {
+    logger.error(
+      { expectedExchange, actual: msg.fields.exchange, eventType: envelope.eventType },
+      'llegó por un exchange distinto al que declara su esquema, va directo a la DLQ',
     );
     return channel.nack(msg, false, false);
   }
@@ -154,7 +177,16 @@ async function handle(channel, msg, registry) {
 }
 
 async function handleFailure(channel, msg, envelope, err) {
-  const retryCount = Number(msg.properties.headers?.['x-retry-count'] ?? 0);
+  const rawRetryCount = msg.properties.headers?.['x-retry-count'] ?? 0;
+  const retryCount = Number(rawRetryCount);
+
+  // `Number('algo-raro')` es NaN, y NaN >= MAX_RETRIES siempre da false: sin esto, un header
+  // corrupto o forjado (mismo problema de fondo que no separar exchange/productor del mensaje)
+  // reintentaría para siempre en vez de agotarse. Negativo tampoco es válido.
+  if (!Number.isInteger(retryCount) || retryCount < 0) {
+    logger.error({ rawRetryCount, eventType: envelope.eventType }, 'x-retry-count inválido, va directo a la DLQ');
+    return channel.nack(msg, false, false);
+  }
 
   if (retryCount >= MAX_RETRIES) {
     logger.error({ err, eventType: envelope.eventType, retryCount }, 'reintentos agotados, va a la DLQ');
@@ -182,4 +214,4 @@ async function handleFailure(channel, msg, envelope, err) {
 }
 
 // Export solo para pruebas.
-export const _internal = { handlers, handle };
+export const _internal = { handlers, handle, handleFailure };

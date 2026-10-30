@@ -16,7 +16,9 @@ export async function startMessaging({ retryMs = 3000 } = {}) {
   let current = null;
 
   async function connectOnce() {
-    for (;;) {
+    // Revisa `stopped` en cada vuelta: si stop() se pide mientras esto espera el siguiente
+    // intento, se sale pronto en vez de seguir reconectando después de "apagado".
+    while (!stopped) {
       try {
         return await connect(config.amqpUrl);
       } catch (err) {
@@ -24,13 +26,33 @@ export async function startMessaging({ retryMs = 3000 } = {}) {
         await new Promise((resolve) => setTimeout(resolve, retryMs));
       }
     }
+    return null;
+  }
+
+  async function teardown(wiring) {
+    if (!wiring) return;
+    wiring.publisher.stop();
+    await wiring.consumerChannel.close().catch(() => {});
+    await wiring.connection.close().catch(() => {});
   }
 
   async function wire() {
     const connection = await connectOnce();
+    if (!connection) return; // se pidió detener mientras reintentaba
+
+    if (stopped) {
+      // stop() corrió justo cuando esta conexión (tardía) se abrió: no la uses.
+      await connection.close().catch(() => {});
+      return;
+    }
+
     const publisher = startOutboxPublisher(connection);
     const consumerChannel = await startInboxConsumer(connection);
+    const previous = current;
     current = { connection, publisher, consumerChannel };
+    // La anterior se cierra DESPUÉS de armar la nueva, no antes: si seguía viva por el tiempo
+    // que sea, nunca quedan las dos publicando/consumiendo el mismo outbox/inbox a la vez.
+    await teardown(previous);
 
     connection.once('close', () => {
       if (stopped) return;
@@ -45,11 +67,8 @@ export async function startMessaging({ retryMs = 3000 } = {}) {
   return {
     stop: async () => {
       stopped = true;
-      if (current) {
-        current.publisher.stop();
-        await current.consumerChannel.close().catch(() => {});
-        await current.connection.close().catch(() => {});
-      }
+      await teardown(current);
+      current = null;
     },
   };
 }
