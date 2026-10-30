@@ -10,9 +10,11 @@ describe('GET /health', () => {
   });
 });
 
-describe('POST /api/events', () => {
+describe('POST /events', () => {
+  // La ruta real es /events, no /api/events: Kong quita el /api antes de reenviar
+  // (contracts/README.md confirma el mismo patrón en auth-service: /api/auth -> /auth).
   it('rechaza sin token', async () => {
-    const res = await request(createApp()).post('/api/events').send({});
+    const res = await request(createApp()).post('/events').send({});
     expect(res.status).toBe(401);
   });
 });

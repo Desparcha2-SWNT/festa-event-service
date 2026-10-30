@@ -32,14 +32,15 @@ describe('handler account.deleted', () => {
         .mockResolvedValueOnce({ rows: [pendingEvent] }) // SELECT eventos a cancelar
         .mockResolvedValueOnce({ rows: [] }) // UPDATE events SET status='cancelled'...
         .mockResolvedValueOnce({ rows: [] }) // INSERT INTO outbox (enqueue)
-        .mockResolvedValueOnce({ rows: [] }), // UPDATE events SET organizer_name=...
+        .mockResolvedValueOnce({ rows: [] }) // UPDATE events SET organizer_name=...
+        .mockResolvedValueOnce({ rows: [] }), // DELETE FROM verified_merchants
     };
     const data = { userId: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f', deletedAt: '2026-12-01T10:00:00Z' };
     const envelope = { eventId: 'eventid-del-account-deleted', eventType: 'account.deleted', data };
 
     await _internal.handlers['account.deleted'](data, client, envelope);
 
-    expect(client.query).toHaveBeenCalledTimes(4);
+    expect(client.query).toHaveBeenCalledTimes(5);
 
     const [selectSql, selectParams] = client.query.mock.calls[0];
     expect(selectSql).toMatch(/SELECT id, title, version FROM events/);
@@ -65,19 +66,25 @@ describe('handler account.deleted', () => {
     const [anonymizeSql, anonymizeParams] = client.query.mock.calls[3];
     expect(anonymizeSql).toMatch(/UPDATE events SET organizer_name = 'Organizador eliminado'/);
     expect(anonymizeParams).toEqual([data.userId]);
+
+    const [deleteMerchantSql, deleteMerchantParams] = client.query.mock.calls[4];
+    expect(deleteMerchantSql).toMatch(/DELETE FROM verified_merchants/);
+    expect(deleteMerchantParams).toEqual([data.userId]);
   });
 
-  it('igual anonimiza aunque no tenga eventos futuros que cancelar', async () => {
+  it('igual anonimiza y borra la proyección de comercio aunque no tenga eventos futuros que cancelar', async () => {
     const client = {
       query: vi
         .fn()
         .mockResolvedValueOnce({ rows: [] }) // SELECT: nada que cancelar
-        .mockResolvedValueOnce({ rows: [] }), // UPDATE organizer_name
+        .mockResolvedValueOnce({ rows: [] }) // UPDATE organizer_name
+        .mockResolvedValueOnce({ rows: [] }), // DELETE FROM verified_merchants
     };
     const data = { userId: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f', deletedAt: '2026-12-01T10:00:00Z' };
 
     await _internal.handlers['account.deleted'](data, client, { eventId: 'x' });
 
-    expect(client.query).toHaveBeenCalledTimes(2);
+    expect(client.query).toHaveBeenCalledTimes(3);
+    expect(client.query.mock.calls[2][0]).toMatch(/DELETE FROM verified_merchants/);
   });
 });

@@ -13,7 +13,11 @@ CREATE TABLE outbox (
   -- petición HTTP que originó la cadena (lo pone Kong) y solo existe si esto nació de una
   -- petición; causationId es el eventId del mensaje que causó este y solo existe si esto nació
   -- de consumir otro mensaje. Nunca los dos a la vez. Quien inserta la fila decide cuál llenar.
-  correlation_id  uuid,
+  -- correlationId es "string" en el contrato, NO necesariamente un uuid (un cliente podría
+  -- mandar cualquier cosa saltándose el gateway) — si esta columna fuera uuid, guardar un
+  -- X-Correlation-ID no-uuid tronaría con un 500 al crear el evento. causationId sí es
+  -- siempre un eventId nuestro, así que ese sí es uuid de verdad.
+  correlation_id  text,
   causation_id    uuid,
   exchange        text NOT NULL,
   routing_key     text NOT NULL,

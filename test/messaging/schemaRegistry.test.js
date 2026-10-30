@@ -69,6 +69,13 @@ describe.skipIf(!hasContracts)('schemaRegistry', () => {
     expect(validateData({ userId: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f', deletedAt: '2026-12-01T10:00:00Z' })).toBe(true);
     expect(validateData({ userId: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f' })).toBe(false); // falta deletedAt
   });
+
+  it('sabe quién es el dueño real de cada eventType', () => {
+    expect(registry.getExpectedProducer('merchant.verified')).toBe('user-service');
+    expect(registry.getExpectedProducer('account.deleted')).toBe('auth-service');
+    expect(registry.getExpectedProducer('event.published')).toBe('event-service');
+    expect(registry.getExpectedProducer('esto.no_existe')).toBeUndefined();
+  });
 });
 
 if (!hasContracts) {

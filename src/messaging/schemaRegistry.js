@@ -19,12 +19,14 @@ function build(contractsDir) {
   const validateEnvelope = ajv.compile(readJson(path.join(contractsDir, 'envelope.schema.json')));
 
   const dataValidators = new Map();
+  const producers = new Map();
   const eventsDir = path.join(contractsDir, 'events');
   for (const domain of fs.readdirSync(eventsDir)) {
     const domainDir = path.join(eventsDir, domain);
     for (const file of fs.readdirSync(domainDir)) {
       const schema = readJson(path.join(domainDir, file));
       dataValidators.set(schema['x-routing-key'], ajv.compile(schema));
+      producers.set(schema['x-routing-key'], schema['x-producer']);
     }
   }
 
@@ -32,6 +34,14 @@ function build(contractsDir) {
     validateEnvelope,
     /** El validador de ajv para `data` de ese eventType, o undefined si no hay esquema. */
     getDataValidator: (eventType) => dataValidators.get(eventType),
+    /**
+     * El `x-producer` que el catálogo declara dueño de ese eventType. La forma estructural del
+     * mensaje no basta como autorización: nada impide que algo con las credenciales compartidas
+     * de RabbitMQ (ver festa-infra, un solo usuario para todos los servicios hoy) publique un
+     * mensaje bien formado con un `producer` falso. Esto es una capa extra de defensa, no
+     * reemplaza separar credenciales/ACL por servicio en festa-infra (pendiente ahí, no aquí).
+     */
+    getExpectedProducer: (eventType) => producers.get(eventType),
   };
 }
 

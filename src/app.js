@@ -9,7 +9,10 @@ export function createApp() {
   app.use(express.json());
 
   app.get('/health', (req, res) => res.json({ status: 'ok' }));
-  app.use('/api/events', eventsRouter);
+  // El cliente le pega a /api/events; el plugin global pre-function de Kong quita el "/api"
+  // antes de reenviar (ver kong.yml.tmpl, cabecera del archivo). El servicio recibe /events,
+  // igual que auth-service recibe /auth aunque el cliente llame a /api/auth.
+  app.use('/events', eventsRouter);
 
   app.use((err, req, res, _next) => {
     req.log.error(err);

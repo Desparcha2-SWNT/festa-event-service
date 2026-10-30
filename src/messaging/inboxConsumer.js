@@ -22,8 +22,10 @@ const handlers = {
     );
   },
 
-  // RF: derecho de supresión (Ley 1581). Cancela los eventos futuros del organizador y
-  // anonimiza su nombre visible en TODOS sus eventos (también los pasados: es dato personal).
+  // RF: derecho de supresión (Ley 1581). Cancela los eventos futuros del organizador, anonimiza
+  // su nombre visible en TODOS sus eventos (también los pasados: es dato personal) y borra su
+  // proyección de comercio verificado (si no, el negocio sigue ahí y, aunque la cuenta borrada
+  // no pueda volver a autenticarse, el dato de comercio queda retenido sin ningún propósito).
   'account.deleted': async (data, client, envelope) => {
     const { rows: toCancel } = await client.query(
       `SELECT id, title, version FROM events
@@ -57,18 +59,26 @@ const handlers = {
        WHERE organizer_id = $1 AND organizer_name <> 'Organizador eliminado'`,
       [data.userId],
     );
+
+    await client.query('DELETE FROM verified_merchants WHERE user_id = $1', [data.userId]);
   },
 };
 
 /**
  * Consume `event-service.inbox` siguiendo contracts/README.md § Consumir: valida el sobre y
- * `data` contra los esquemas reales, es idempotente (tabla processed_events), reintenta
- * errores transitorios vía inbox.retry y manda a la DLQ los permanentes (dato inválido o
- * reintentos agotados).
+ * `data` contra los esquemas reales (y que el productor declarado sea el dueño real de ese
+ * eventType), es idempotente (tabla processed_events), reintenta errores transitorios vía
+ * inbox.retry y manda a la DLQ los permanentes (dato inválido, productor falso o reintentos
+ * agotados).
+ *
+ * Usa un canal CON confirms: encolar el reintento (`channel.sendToQueue` en handleFailure)
+ * espera la confirmación del broker antes de hacer `ack` del mensaje original. Sin eso, si
+ * RabbitMQ se cae justo entre las dos operaciones, el original queda confirmado y el
+ * reintento se pierde sin que nadie se entere.
  */
 export async function startInboxConsumer(connection) {
   const registry = getSchemaRegistry(config.contractsDir);
-  const channel = await connection.createChannel();
+  const channel = await connection.createConfirmChannel();
   await channel.prefetch(10);
 
   await channel.consume(QUEUE, (msg) => {
@@ -92,6 +102,19 @@ async function handle(channel, msg, registry) {
 
   if (!registry.validateEnvelope(envelope)) {
     logger.error({ errors: registry.validateEnvelope.errors }, 'el sobre no cumple envelope.schema.json, va directo a la DLQ');
+    return channel.nack(msg, false, false);
+  }
+
+  const expectedProducer = registry.getExpectedProducer(envelope.eventType);
+  if (expectedProducer && envelope.producer !== expectedProducer) {
+    // Capa extra de defensa: hoy todos los servicios comparten un único usuario de RabbitMQ
+    // (ver festa-infra), así que RabbitMQ por sí solo no impide que cualquiera publique un
+    // mensaje bien formado con un `producer` ajeno. No es retryable: el mensaje nunca va a
+    // dejar de estar mal.
+    logger.error(
+      { expectedProducer, actual: envelope.producer, eventType: envelope.eventType },
+      'el productor declarado no es el dueño de este eventType, va directo a la DLQ',
+    );
     return channel.nack(msg, false, false);
   }
 
@@ -139,12 +162,24 @@ async function handleFailure(channel, msg, envelope, err) {
   }
 
   logger.warn({ err, eventType: envelope.eventType, retryCount }, 'falla transitoria, se reintenta');
-  channel.sendToQueue(RETRY_QUEUE, msg.content, {
-    ...msg.properties,
-    headers: { ...msg.properties.headers, 'x-retry-count': retryCount + 1 },
-  });
-  channel.ack(msg);
+  try {
+    await new Promise((resolve, reject) => {
+      channel.sendToQueue(
+        RETRY_QUEUE,
+        msg.content,
+        { ...msg.properties, headers: { ...msg.properties.headers, 'x-retry-count': retryCount + 1 } },
+        (publishErr) => (publishErr ? reject(publishErr) : resolve()),
+      );
+    });
+    // Solo se confirma el original una vez el broker confirmó que recibió el reintento.
+    channel.ack(msg);
+  } catch (publishErr) {
+    // No se sabe si el reintento llegó: no se hace ack ni nack. Si la conexión/canal se cayó
+    // (lo más probable aquí), RabbitMQ va a redeliverlo solo cuando el consumidor reconecte;
+    // processed_events ya cubre que el reintento llegue dos veces.
+    logger.error({ err: publishErr }, 'no se pudo confirmar el reintento, se deja el mensaje sin confirmar');
+  }
 }
 
 // Export solo para pruebas.
-export const _internal = { handlers };
+export const _internal = { handlers, handle };

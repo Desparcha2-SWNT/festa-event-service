@@ -24,8 +24,11 @@ desde `festa-infra`.
 
 ## Arquitectura
 
-- **API**: Express. El gateway (Kong) ya valida el JWT antes de que la petición llegue aquí;
-  `src/middleware/auth.js` solo lo decodifica para saber quién es el usuario.
+- **API**: Express, montado en `/events` (no `/api/events`) — el cliente le pega a
+  `/api/events`, pero un plugin global de Kong quita el `/api` antes de reenviar al upstream
+  (ver `festa-gateway/kong.yml.tmpl`, mismo patrón que `/api/auth` → `/auth`). El gateway ya
+  valida el JWT antes de que la petición llegue aquí; `src/middleware/auth.js` solo lo
+  decodifica para saber quién es el usuario.
 - **Datos**: Postgres con PostGIS. Las coordenadas del lugar del evento van en una columna
   `geography(Point, 4326)` (`migrations/001_events.sql`), para poder consultar cercanía más
   adelante (RF5) sin tabla aparte.
@@ -43,6 +46,10 @@ desde `festa-infra`.
   registró como comercio (auth-service lo deja autoasignar al registrarse), no que esté
   verificado ni que un `merchantId` dado sea suyo. Crear un evento `ticketed` exige además que
   ese `merchantId` esté en `verified_merchants` **con ese mismo `user_id`**.
+- **Resiliencia**: si RabbitMQ se cae después de que el servicio ya arrancó (no solo al
+  arrancar), `src/messaging/supervisor.js` reconecta y vuelve a armar el publicador y el
+  consumidor solo. Las migraciones piden un advisory lock de Postgres
+  (`src/db/migrate.js`) para que dos réplicas arrancando a la vez no corran la misma dos veces.
 
 ## Pruebas
 
