@@ -3,7 +3,7 @@ import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { createEventSchema } from './validation.js';
-import { createEvent, findEventById, isMerchantVerified } from './repository.js';
+import { createEvent, findEventById, isMerchantOwnedAndVerified } from './repository.js';
 
 export const eventsRouter = Router();
 
@@ -19,15 +19,16 @@ eventsRouter.post('/', requireAuth, async (req, res, next) => {
     return res.status(400).json({ error: 'cuerpo inválido', issues: z.treeifyError(parsed.error) });
   }
   // Un usuario normal no puede crear eventos como merchant. El claim por sí solo no basta
-  // (auth-service deja autoasignarlo al registrarse): además hace falta que un admin haya
-  // verificado ESE merchantId (proyección de merchant.verified, ver isMerchantVerified).
+  // (auth-service deja autoasignarlo al registrarse): además hace falta que ESE merchantId
+  // esté verificado Y sea del usuario autenticado (si no, un merchant verificado cualquiera
+  // podría crear eventos a nombre de otro comercio con solo adivinar su merchantId).
   if (parsed.data.organizerType === 'merchant') {
     if (req.auth.accountType !== 'merchant') {
       return res.status(403).json({ error: 'solo un merchant puede crear eventos como merchant' });
     }
     try {
-      if (!(await isMerchantVerified(parsed.data.merchantId))) {
-        return res.status(403).json({ error: 'el comercio todavía no está verificado' });
+      if (!(await isMerchantOwnedAndVerified(parsed.data.merchantId, req.auth.userId))) {
+        return res.status(403).json({ error: 'el comercio no está verificado o no es tuyo' });
       }
     } catch (err) {
       return next(err);
@@ -35,7 +36,8 @@ eventsRouter.post('/', requireAuth, async (req, res, next) => {
   }
 
   try {
-    const event = await createEvent(parsed.data, req.auth.userId);
+    const correlationId = req.headers['x-correlation-id'] ?? null;
+    const event = await createEvent(parsed.data, req.auth.userId, correlationId);
     res.status(201).json(event);
   } catch (err) {
     next(err);

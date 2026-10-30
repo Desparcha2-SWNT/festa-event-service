@@ -33,7 +33,16 @@ desde `festa-infra`.
   idempotencia al consumir, siguiendo exactamente lo que define
   [`festa-infra/contracts/README.md`](../festa-infra/contracts/README.md). El worker de outbox
   y el consumidor de inbox corren dentro del mismo proceso (`src/server.js`), no como un job
-  aparte — alcanza para el volumen del pilot.
+  aparte — alcanza para el volumen del pilot. El inbox valida el sobre y `data` de cada mensaje
+  contra los esquemas reales (`src/messaging/schemaRegistry.js`) antes de despachar a un
+  handler; lo inválido va directo a la DLQ, no se reintenta. Hoy tiene handler para
+  `merchant.verified` (proyección de comercios verificados, `verified_merchants`) y
+  `account.deleted` (cancela los eventos futuros del organizador y anonimiza su nombre en
+  todos, pasados y futuros — Ley 1581).
+- **Autorización de "merchant"**: el claim `role: merchant` del JWT solo dice que la cuenta se
+  registró como comercio (auth-service lo deja autoasignar al registrarse), no que esté
+  verificado ni que un `merchantId` dado sea suyo. Crear un evento `ticketed` exige además que
+  ese `merchantId` esté en `verified_merchants` **con ese mismo `user_id`**.
 
 ## Pruebas
 

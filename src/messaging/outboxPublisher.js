@@ -22,7 +22,7 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
       const channel = await channelPromise;
       await client.query('BEGIN');
       const { rows } = await client.query(
-        `SELECT id, event_id, correlation_id, exchange, routing_key, payload FROM outbox
+        `SELECT id, event_id, correlation_id, causation_id, exchange, routing_key, payload FROM outbox
          WHERE sent_at IS NULL ORDER BY created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,
       );
 
@@ -34,7 +34,7 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
           occurredAt: new Date().toISOString(),
           producer: 'event-service',
           correlationId: row.correlation_id,
-          causationId: null,
+          causationId: row.causation_id,
           data: row.payload,
         };
         const content = Buffer.from(JSON.stringify(envelope));
@@ -44,7 +44,15 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
             row.exchange,
             row.routing_key,
             content,
-            { persistent: true, contentType: 'application/json', messageId: envelope.eventId, type: envelope.eventType },
+            {
+              persistent: true,
+              contentType: 'application/json',
+              messageId: envelope.eventId,
+              type: envelope.eventType,
+              // contracts/README.md § Publicar. Solo tiene sentido si esto nació de una
+              // petición HTTP (correlationId); si nació de consumir otro mensaje, no hay.
+              headers: row.correlation_id ? { 'x-correlation-id': row.correlation_id } : {},
+            },
             (err) => (err ? reject(err) : resolve()),
           );
         });

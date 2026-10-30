@@ -19,6 +19,10 @@ COPY --from=build /build/node_modules ./node_modules
 COPY --from=build /build/package.json ./
 COPY --from=build /build/src ./src
 COPY --from=build /build/migrations ./migrations
+# El inbox valida mensajes contra estos esquemas en runtime (src/messaging/schemaRegistry.js),
+# no solo en las pruebas: también hacen falta en la imagen final, no solo en el build.
+COPY --from=build /contracts ./contracts
+ENV FESTA_CONTRACTS_DIR=/app/contracts
 USER festa
 EXPOSE 8083
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \

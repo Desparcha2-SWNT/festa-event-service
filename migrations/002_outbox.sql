@@ -9,7 +9,12 @@ CREATE TABLE outbox (
   -- inbox del consumidor lo deduplica por processed_events. Si se generara uno nuevo en
   -- cada intento, un duplicado de red sería indistinguible de un evento nuevo.
   event_id        uuid NOT NULL DEFAULT gen_random_uuid(),
-  correlation_id  uuid NOT NULL DEFAULT gen_random_uuid(),
+  -- Nulos a propósito (ver envelope.schema.json): correlationId es el X-Correlation-ID de la
+  -- petición HTTP que originó la cadena (lo pone Kong) y solo existe si esto nació de una
+  -- petición; causationId es el eventId del mensaje que causó este y solo existe si esto nació
+  -- de consumir otro mensaje. Nunca los dos a la vez. Quien inserta la fila decide cuál llenar.
+  correlation_id  uuid,
+  causation_id    uuid,
   exchange        text NOT NULL,
   routing_key     text NOT NULL,
   payload         jsonb NOT NULL,

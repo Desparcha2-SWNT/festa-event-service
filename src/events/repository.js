@@ -1,4 +1,5 @@
 import { pool, withTransaction } from '../db/pool.js';
+import { enqueue } from '../messaging/outboxRepository.js';
 
 function toRow(input) {
   return {
@@ -59,9 +60,10 @@ export function toApi(row) {
 
 /**
  * Inserta el evento y, en la misma transacción, la fila de outbox para `event.published`
- * (ver contracts/README.md § Publicar — transactional outbox).
+ * (ver contracts/README.md § Publicar — transactional outbox). `correlationId` es el
+ * X-Correlation-ID de la petición HTTP (lo pone Kong), para poder rastrear la cadena completa.
  */
-export async function createEvent(input, organizerId) {
+export async function createEvent(input, organizerId, correlationId) {
   const r = toRow(input);
   return withTransaction(async (client) => {
     const { rows } = await client.query(
@@ -103,10 +105,7 @@ export async function createEvent(input, organizerId) {
     const row = rows[0];
     const api = toApi(row);
 
-    await client.query(
-      `INSERT INTO outbox (exchange, routing_key, payload) VALUES ($1, $2, $3)`,
-      ['festa.event', 'event.published', JSON.stringify(api)],
-    );
+    await enqueue(client, { exchange: 'festa.event', routingKey: 'event.published', payload: api, correlationId });
 
     return api;
   });
@@ -123,11 +122,15 @@ export async function findEventById(id) {
 
 /**
  * El claim "role: merchant" del JWT solo dice que la cuenta se registró como comercio
- * (auth-service deja elegirlo al registrarse); no que un admin lo verificó. Esta proyección
- * (migrations/004_verified_merchants.sql, llenada por el handler de merchant.verified) es la
- * única fuente confiable de "puede vender boletas".
+ * (auth-service deja elegirlo al registrarse); no que un admin lo verificó, ni que ESE
+ * merchantId sea del usuario autenticado. Esta proyección (migrations/004_verified_merchants.sql,
+ * llenada por el handler de merchant.verified) es la única fuente confiable de ambas cosas:
+ * sin comprobar `user_id`, cualquier merchant verificado podría crear eventos a nombre de otro.
  */
-export async function isMerchantVerified(merchantId) {
-  const { rows } = await pool.query('SELECT 1 FROM verified_merchants WHERE merchant_id = $1', [merchantId]);
+export async function isMerchantOwnedAndVerified(merchantId, userId) {
+  const { rows } = await pool.query(
+    'SELECT 1 FROM verified_merchants WHERE merchant_id = $1 AND user_id = $2',
+    [merchantId, userId],
+  );
   return rows.length > 0;
 }
