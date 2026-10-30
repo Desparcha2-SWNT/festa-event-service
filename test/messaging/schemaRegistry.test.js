@@ -1,14 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { getSchemaRegistry, _resetForTests } from '../../src/messaging/schemaRegistry.js';
 
 const contractsDir = process.env.FESTA_CONTRACTS_DIR ?? path.resolve('../festa-infra/contracts');
 const hasContracts = fs.existsSync(path.join(contractsDir, 'envelope.schema.json'));
 
 describe.skipIf(!hasContracts)('schemaRegistry', () => {
-  _resetForTests();
-  const registry = getSchemaRegistry(contractsDir);
+  // Dentro de beforeAll (no al nivel del describe): con skipIf, vitest igual EJECUTA el
+  // cuerpo del describe al recolectar las pruebas — solo se saltan los hooks y los it().
+  // Si esto se llamara aquí directo, tronaría aunque hasContracts fuera false.
+  let registry;
+  beforeAll(() => {
+    _resetForTests();
+    registry = getSchemaRegistry(contractsDir);
+  });
 
   it('valida un sobre real (del ejemplo de merchant.verified)', () => {
     const data = {
