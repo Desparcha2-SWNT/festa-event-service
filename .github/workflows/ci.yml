@@ -25,6 +25,8 @@ jobs:
       contents: read
       security-events: write
     with:
+      # Este repo compila y prueba en su propio job; el build del CI reutilizable se omite (no queda en verde, queda "skipped").
+      stack: none
       enable-codeql: true
       codeql-language: javascript-typescript
 
