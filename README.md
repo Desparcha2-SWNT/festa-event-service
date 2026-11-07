@@ -50,6 +50,9 @@ desde `festa-infra`.
   arrancar), `src/messaging/supervisor.js` reconecta y vuelve a armar el publicador y el
   consumidor solo. Las migraciones piden un advisory lock de Postgres
   (`src/db/migrate.js`) para que dos réplicas arrancando a la vez no corran la misma dos veces.
+- **Detrás de Kong**: Express confía en un proxy (`TRUST_PROXY`, por defecto 1), así que `req.ip`
+  es la IP del cliente que Kong pone en `X-Forwarded-For`, no la de Kong. Sin eso, el límite por IP
+  de `src/events/routes.js` lo compartirían todos los clientes.
 
 ## Pruebas
 
