@@ -61,3 +61,10 @@ La prueba de contrato (`test/contract.test.js`) valida que lo que arma este serv
 `event.published` cumpla el esquema real de `festa-infra/contracts`. Si no encuentra ese repo
 como hermano, se salta sola (y lo avisa) — en CI y en el build de Docker sí se exige, con
 `FESTA_CONTRACTS_DIR` apuntando a los contratos.
+
+## Despliegue (CD)
+
+`.github/workflows/cd.yml` construye la imagen con los contratos de `festa-infra` como
+build-context (las pruebas corren dentro del build) y, en un push a `main`, la publica en
+`ghcr.io/desparcha2-swnt/festa-event-service` con los tags `sha-<commit>` y `latest`. En un PR
+solo la construye. El paso de desplegar en AWS llega con SCRUM-134.
