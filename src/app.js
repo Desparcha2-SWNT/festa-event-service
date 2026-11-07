@@ -1,10 +1,14 @@
 import express from 'express';
 import pinoHttp from 'pino-http';
+import { config } from './config.js';
 import { logger } from './logger.js';
 import { eventsRouter } from './events/routes.js';
 
-export function createApp() {
+export function createApp({ trustProxy = config.trustProxy } = {}) {
   const app = express();
+  // Detrás de Kong: sin esto, req.ip es la IP de Kong y todos los clientes comparten el límite
+  // por IP de routes.js (express-rate-limit además lo avisa con ERR_ERL_UNEXPECTED_X_FORWARDED_FOR).
+  app.set('trust proxy', trustProxy);
   app.use(pinoHttp({ logger }));
   app.use(express.json());
 
