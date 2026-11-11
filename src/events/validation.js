@@ -45,3 +45,6 @@ export const createEventSchema = z
     message: 'priceCents debe ser 0 si el evento no es ticketed',
     path: ['priceCents'],
   });
+
+// El motivo viaja en event.cancelled (máximo 500 caracteres, ver event.cancelled.schema.json).
+export const cancelEventSchema = z.object({ reason: z.string().trim().min(1).max(500) }).strict();

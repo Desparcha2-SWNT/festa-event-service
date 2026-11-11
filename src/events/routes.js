@@ -2,8 +2,8 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
-import { createEventSchema } from './validation.js';
-import { createEvent, findEventById, isMerchantOwnedAndVerified } from './repository.js';
+import { cancelEventSchema, createEventSchema } from './validation.js';
+import { cancelEvent, createEvent, findEventById, isMerchantOwnedAndVerified } from './repository.js';
 
 export const eventsRouter = Router();
 
@@ -52,6 +52,34 @@ eventsRouter.get('/:id', requireAuth, async (req, res, next) => {
     const event = await findEventById(req.params.id);
     if (!event) return res.status(404).json({ error: 'evento no encontrado' });
     res.json(event);
+  } catch (err) {
+    next(err);
+  }
+});
+
+const CANCEL_ERRORS = {
+  not_found: [404, 'evento no encontrado'],
+  forbidden: [403, 'solo quien creó el evento puede cancelarlo'],
+  conflict: [409, 'el evento ya no se puede cancelar'],
+};
+
+eventsRouter.post('/:id/cancel', requireAuth, async (req, res, next) => {
+  const idCheck = z.uuid().safeParse(req.params.id);
+  if (!idCheck.success) return res.status(400).json({ error: 'id inválido' });
+
+  const parsed = cancelEventSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'cuerpo inválido', issues: z.treeifyError(parsed.error) });
+  }
+
+  try {
+    const correlationId = req.headers['x-correlation-id'] ?? null;
+    const result = await cancelEvent(req.params.id, req.auth.userId, parsed.data.reason, correlationId);
+    if (result.outcome !== 'cancelled') {
+      const [status, error] = CANCEL_ERRORS[result.outcome];
+      return res.status(status).json({ error });
+    }
+    res.json(result.event);
   } catch (err) {
     next(err);
   }
