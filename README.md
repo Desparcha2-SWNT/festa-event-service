@@ -7,6 +7,22 @@ por id. El resto (editar/cancelar, búsqueda, mapa, clústeres, Parches en Vivo)
 aparte — ver el catálogo completo en Jira bajo [SCRUM-7 "Gestión de eventos"](https://desparcha2.atlassian.net/browse/SCRUM-7)
 y [SCRUM-8 "Mapa y descubrimiento"](https://desparcha2.atlassian.net/browse/SCRUM-8).
 
+## API
+
+Montada en `/events`; el cliente la llama como `/api/events` a través del gateway. Todas las rutas exigen JWT.
+
+| Método y ruta | Qué hace |
+|---|---|
+| `POST /events` | Crea un evento (SCRUM-64). Con `organizerType: merchant` exige un comercio verificado y propio. |
+| `GET /events/mine` | Eventos creados por el usuario autenticado, en todos los estados, del más reciente al más antiguo. |
+| `GET /events/:id` | Un evento por id. |
+| `PATCH /events/:id` | Edita un evento (SCRUM-67). Solo se envían los campos que cambian: `title`, `description`, `descriptionAiGenerated`, `category`, `startsAt`, `endsAt`, `venue`, `capacity`. Publica `event.updated` y, si cambia la hora de inicio o el lugar, también `event.rescheduled` para avisar a los asistentes. |
+| `POST /events/:id/cancel` | Cancela un evento (SCRUM-68) y publica `event.cancelled`. |
+
+Editar y cancelar siguen la misma regla (SCRUM-69): solo el creador (403 para los demás) y solo un evento
+publicado que no ha terminado (409 si no). El tipo de organizador, el comercio, la boletería y el precio no se
+editan, porque de ellos dependen pagos y pases ya emitidos.
+
 ## Arranque local
 
 Necesita la infraestructura de `festa-infra` corriendo (Postgres+PostGIS, RabbitMQ) — ver su

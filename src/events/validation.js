@@ -1,5 +1,16 @@
 import { z } from 'zod';
 
+const categorySchema = z.enum(['cultural', 'musical', 'deportivo', 'gastronomico']);
+
+const venueSchema = z.object({
+  name: z.string().max(120),
+  address: z.string().max(200),
+  location: z.object({
+    lat: z.number().min(-90).max(90),
+    lng: z.number().min(-180).max(180),
+  }),
+});
+
 // Espejo del `data` de contracts/events/event/event.published.schema.json, para lo que
 // recibe este endpoint (el resto de ese esquema lo completa el servicio: eventId, status, version...).
 export const createEventSchema = z
@@ -10,18 +21,11 @@ export const createEventSchema = z
     title: z.string().min(3).max(120),
     description: z.string().max(2000),
     descriptionAiGenerated: z.boolean().optional().default(false),
-    category: z.enum(['cultural', 'musical', 'deportivo', 'gastronomico']),
+    category: categorySchema,
     tags: z.array(z.string().max(30)).max(10).optional().default([]),
     startsAt: z.iso.datetime(),
     endsAt: z.iso.datetime(),
-    venue: z.object({
-      name: z.string().max(120),
-      address: z.string().max(200),
-      location: z.object({
-        lat: z.number().min(-90).max(90),
-        lng: z.number().min(-180).max(180),
-      }),
-    }),
+    venue: venueSchema,
     capacity: z.number().int().min(1).nullable().optional(),
     ticketed: z.boolean().optional().default(false),
     priceCents: z.number().int().min(0).optional().default(0),
@@ -48,3 +52,23 @@ export const createEventSchema = z
 
 // El motivo viaja en event.cancelled (máximo 500 caracteres, ver event.cancelled.schema.json).
 export const cancelEventSchema = z.object({ reason: z.string().trim().min(1).max(500) }).strict();
+
+// SCRUM-67: lo que el organizador puede cambiar de un evento publicado (Figma «25 · Editar evento»).
+// Solo se envían los campos que cambian. El tipo de organizador, el comercio, la boletería y el
+// precio no se editan: de ellos dependen pagos y pases ya emitidos. Que endsAt quede después de
+// startsAt se valida al combinar con el evento guardado (ver updateEvent), porque puede llegar
+// solo uno de los dos.
+export const updateEventSchema = z
+  .object({
+    title: z.string().min(3).max(120),
+    description: z.string().max(2000),
+    descriptionAiGenerated: z.boolean(),
+    category: categorySchema,
+    startsAt: z.iso.datetime(),
+    endsAt: z.iso.datetime(),
+    venue: venueSchema,
+    capacity: z.number().int().min(1).nullable(),
+  })
+  .partial()
+  .strict()
+  .refine((changes) => Object.keys(changes).length > 0, { message: 'no hay cambios' });
