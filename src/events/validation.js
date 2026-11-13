@@ -1,5 +1,15 @@
 import { z } from 'zod';
 
+const LIVE_WINDOW_MS = 2 * 3600_000;
+const LIVE_MAX_DURATION_MS = 8 * 3600_000;
+// Se tolera un inicio unos minutos en el pasado (lo que tarda en llenarse el formulario).
+const LIVE_PAST_TOLERANCE_MS = 15 * 60_000;
+
+export function isWithinLiveWindow(startsAt, now = Date.now()) {
+  const t = new Date(startsAt).getTime();
+  return t >= now - LIVE_PAST_TOLERANCE_MS && t <= now + LIVE_WINDOW_MS;
+}
+
 const categorySchema = z.enum(['cultural', 'musical', 'deportivo', 'gastronomico']);
 
 const venueSchema = z.object({
@@ -31,6 +41,8 @@ export const createEventSchema = z
     priceCents: z.number().int().min(0).optional().default(0),
     maxTicketsPerOrder: z.number().int().min(1).max(10).optional(),
     coverImageUrl: z.url().nullable().optional(),
+    // RF19: Parche en Vivo, plan improvisado que arranca en menos de 2 horas y expira solo al terminar.
+    isLive: z.boolean().optional().default(false),
   })
   .refine((e) => new Date(e.endsAt) > new Date(e.startsAt), {
     message: 'endsAt debe ser posterior a startsAt',
@@ -44,6 +56,18 @@ export const createEventSchema = z
     // El contrato (event.published.schema.json) dice "Presente si organizerType = merchant".
     message: 'merchantId es obligatorio cuando organizerType es merchant',
     path: ['merchantId'],
+  })
+  .refine((e) => !e.isLive || isWithinLiveWindow(e.startsAt), {
+    message: 'un Parche en Vivo debe empezar en menos de 2 horas',
+    path: ['startsAt'],
+  })
+  .refine((e) => !e.isLive || new Date(e.endsAt) - new Date(e.startsAt) <= LIVE_MAX_DURATION_MS, {
+    message: 'un Parche en Vivo dura máximo 8 horas',
+    path: ['endsAt'],
+  })
+  .refine((e) => e.isLive || new Date(e.endsAt) > new Date(), {
+    message: 'el evento ya terminó',
+    path: ['endsAt'],
   })
   .refine((e) => e.ticketed || e.priceCents === 0, {
     message: 'priceCents debe ser 0 si el evento no es ticketed',

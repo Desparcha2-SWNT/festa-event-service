@@ -22,6 +22,7 @@ function toRow(input) {
     price_cents: input.priceCents,
     max_tickets_per_order: input.maxTicketsPerOrder ?? null,
     cover_image_url: input.coverImageUrl ?? null,
+    is_live: input.isLive ?? false,
   };
 }
 
@@ -71,11 +72,11 @@ export async function createEvent(input, organizerId, correlationId) {
          organizer_id, organizer_type, merchant_id, organizer_name, title, description,
          description_ai_generated, category, tags, starts_at, ends_at,
          venue_name, venue_address, venue_location,
-         capacity, ticketed, price_cents, max_tickets_per_order, cover_image_url
+         capacity, ticketed, price_cents, max_tickets_per_order, cover_image_url, is_live
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
          ST_SetSRID(ST_MakePoint($14, $15), 4326),
-         $16, $17, $18, $19, $20
+         $16, $17, $18, $19, $20, $21
        )
        RETURNING *,
          ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat`,
@@ -100,6 +101,7 @@ export async function createEvent(input, organizerId, correlationId) {
         r.price_cents,
         r.max_tickets_per_order,
         r.cover_image_url,
+        r.is_live,
       ],
     );
     const row = rows[0];
@@ -117,7 +119,19 @@ export async function findEventById(id) {
      FROM events WHERE id = $1`,
     [id],
   );
-  return rows[0] ? toApi(rows[0]) : null;
+  return rows[0] ? withCounts(rows[0]) : null;
+}
+
+/**
+ * Lo que ve la app: el snapshot del contrato más el conteo de asistentes (RF7). El conteo NO va en
+ * event.published/updated (el esquema es estricto), solo en las respuestas HTTP.
+ */
+export function withCounts(row) {
+  return {
+    ...toApi(row),
+    attendeeCount: row.attendee_count ?? 0,
+    soldOut: row.capacity !== null && (row.attendee_count ?? 0) >= row.capacity,
+  };
 }
 
 /**
@@ -201,7 +215,7 @@ export async function findEventsByOrganizer(userId) {
   const { rows } = await pool.query(`${SELECT_EVENT} WHERE organizer_id = $1 ORDER BY starts_at DESC LIMIT 100`, [
     userId,
   ]);
-  return rows.map(toApi);
+  return rows.map(withCounts);
 }
 
 /** Cambio crítico para quienes ya confirmaron: otra hora de inicio u otro lugar. */

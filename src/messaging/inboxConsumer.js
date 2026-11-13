@@ -4,6 +4,7 @@ import { logger } from '../logger.js';
 import { getSchemaRegistry } from './schemaRegistry.js';
 import { enqueue } from './outboxRepository.js';
 import { toApi } from '../events/repository.js';
+import { applyAttendeeCount, moderation, renameMerchant } from '../events/lifecycle.js';
 
 const QUEUE = 'event-service.inbox';
 const RETRY_QUEUE = 'event-service.inbox.retry';
@@ -76,6 +77,18 @@ const handlers = {
 
     await client.query('DELETE FROM verified_merchants WHERE user_id = $1', [data.userId]);
   },
+
+  // RF7: conteo de asistentes (y event.sold_out si se llena).
+  'attendance.confirmed': (data, client, envelope) => applyAttendeeCount(client, data.eventId, data.attendeeCount, envelope.eventId),
+  'attendance.cancelled': (data, client, envelope) => applyAttendeeCount(client, data.eventId, data.attendeeCount, envelope.eventId),
+
+  // RF14: moderación manual del equipo (user-service).
+  'moderation.event_hidden': (data, client, envelope) => moderation.hideEvent(client, data.eventId, envelope.eventId),
+  'moderation.event_restored': (data, client, envelope) => moderation.restoreEvent(client, data.eventId, envelope.eventId),
+  'moderation.user_suspended': (data, client, envelope) => moderation.hideUserEvents(client, data.userId, envelope.eventId),
+  'moderation.user_reinstated': (data, client, envelope) => moderation.restoreUserEvents(client, data.userId, envelope.eventId),
+
+  'merchant.updated': (data, client, envelope) => renameMerchant(client, data, envelope.eventId),
 };
 
 /**
