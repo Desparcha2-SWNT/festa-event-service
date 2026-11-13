@@ -8,8 +8,8 @@ const base = {
   title: 'Noche de jazz',
   description: 'Una noche de jazz en vivo.',
   category: 'musical',
-  startsAt: '2026-11-07T01:00:00Z',
-  endsAt: '2026-11-07T04:00:00Z',
+  startsAt: '2099-11-07T01:00:00Z',
+  endsAt: '2099-11-07T04:00:00Z',
   venue: { name: 'Café Bohemio', address: 'Cl. 11 #3-45, Bogotá', location: { lat: 4.5981, lng: -74.0758 } },
   ticketed: true,
   priceCents: 2500000,
@@ -21,7 +21,7 @@ describe('createEventSchema', () => {
   });
 
   it('rechaza endsAt antes de startsAt', () => {
-    const result = createEventSchema.safeParse({ ...base, endsAt: '2026-11-06T00:00:00Z' });
+    const result = createEventSchema.safeParse({ ...base, endsAt: '2099-11-06T00:00:00Z' });
     expect(result.success).toBe(false);
   });
 

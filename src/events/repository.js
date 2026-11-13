@@ -22,6 +22,7 @@ function toRow(input) {
     price_cents: input.priceCents,
     max_tickets_per_order: input.maxTicketsPerOrder ?? null,
     cover_image_url: input.coverImageUrl ?? null,
+    is_live: input.isLive ?? false,
   };
 }
 
@@ -71,11 +72,11 @@ export async function createEvent(input, organizerId, correlationId) {
          organizer_id, organizer_type, merchant_id, organizer_name, title, description,
          description_ai_generated, category, tags, starts_at, ends_at,
          venue_name, venue_address, venue_location,
-         capacity, ticketed, price_cents, max_tickets_per_order, cover_image_url
+         capacity, ticketed, price_cents, max_tickets_per_order, cover_image_url, is_live
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
          ST_SetSRID(ST_MakePoint($14, $15), 4326),
-         $16, $17, $18, $19, $20
+         $16, $17, $18, $19, $20, $21
        )
        RETURNING *,
          ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat`,
@@ -100,6 +101,7 @@ export async function createEvent(input, organizerId, correlationId) {
         r.price_cents,
         r.max_tickets_per_order,
         r.cover_image_url,
+        r.is_live,
       ],
     );
     const row = rows[0];
@@ -117,7 +119,19 @@ export async function findEventById(id) {
      FROM events WHERE id = $1`,
     [id],
   );
-  return rows[0] ? toApi(rows[0]) : null;
+  return rows[0] ? withCounts(rows[0]) : null;
+}
+
+/**
+ * Lo que ve la app: el snapshot del contrato más el conteo de asistentes (RF7). El conteo NO va en
+ * event.published/updated (el esquema es estricto), solo en las respuestas HTTP.
+ */
+export function withCounts(row) {
+  return {
+    ...toApi(row),
+    attendeeCount: row.attendee_count ?? 0,
+    soldOut: row.capacity !== null && (row.attendee_count ?? 0) >= row.capacity,
+  };
 }
 
 /**
@@ -133,4 +147,154 @@ export async function isMerchantOwnedAndVerified(merchantId, userId) {
     [merchantId, userId],
   );
   return rows.length > 0;
+}
+
+/**
+ * Regla de SCRUM-69: solo quien creó el evento puede editarlo o cancelarlo. Devuelve el motivo
+ * por el que `userId` no puede tocar la fila, o null si puede. La edición (SCRUM-67) usa la misma regla.
+ */
+export function ownershipError(row, userId) {
+  if (!row) return 'not_found';
+  if (row.organizer_id !== userId) return 'forbidden';
+  return null;
+}
+
+export function toCancelledMessage(event, reason) {
+  return {
+    eventId: event.eventId,
+    organizerId: event.organizerId,
+    title: event.title,
+    reason,
+    cancelledAt: event.updatedAt,
+    version: event.version,
+  };
+}
+
+/**
+ * Cancela el evento y, en la misma transacción, encola `event.cancelled` (booking revoca los pases
+ * y payment pide los reembolsos). El FOR UPDATE evita que dos cancelaciones simultáneas publiquen
+ * el mensaje dos veces. Solo se cancela un evento publicado que aún no ha terminado.
+ */
+export async function cancelEvent(id, userId, reason, correlationId) {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query('SELECT * FROM events WHERE id = $1 FOR UPDATE', [id]);
+    const current = rows[0];
+
+    const denied = ownershipError(current, userId);
+    if (denied) return { outcome: denied };
+    if (current.status !== 'published' || current.ends_at <= new Date()) return { outcome: 'conflict' };
+
+    const updated = await client.query(
+      `UPDATE events SET status = 'cancelled', version = version + 1, updated_at = now()
+       WHERE id = $1
+       RETURNING *,
+         ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat`,
+      [id],
+    );
+    const event = toApi(updated.rows[0]);
+
+    await enqueue(client, {
+      exchange: 'festa.event',
+      routingKey: 'event.cancelled',
+      payload: toCancelledMessage(event, reason),
+      correlationId,
+    });
+
+    return { outcome: 'cancelled', event };
+  });
+}
+
+const SELECT_EVENT = `SELECT *, ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat
+  FROM events`;
+
+/**
+ * Eventos creados por `userId`, en todos los estados, del más reciente al más antiguo
+ * («Mis eventos» en la app). El límite basta para el piloto; si crece, se pagina.
+ */
+export async function findEventsByOrganizer(userId) {
+  const { rows } = await pool.query(`${SELECT_EVENT} WHERE organizer_id = $1 ORDER BY starts_at DESC LIMIT 100`, [
+    userId,
+  ]);
+  return rows.map(withCounts);
+}
+
+/** Cambio crítico para quienes ya confirmaron: otra hora de inicio u otro lugar. */
+function isRescheduled(before, after) {
+  return before.startsAt !== after.startsAt || JSON.stringify(before.venue) !== JSON.stringify(after.venue);
+}
+
+export function toRescheduledMessage(before, event) {
+  return {
+    eventId: event.eventId,
+    title: event.title,
+    previousStartsAt: before.startsAt,
+    startsAt: event.startsAt,
+    endsAt: event.endsAt,
+    previousVenue: before.venue,
+    venue: event.venue,
+    version: event.version,
+    rescheduledAt: event.updatedAt,
+  };
+}
+
+/**
+ * SCRUM-67: aplica `changes` (ya validados con updateEventSchema) al evento y, en la misma
+ * transacción, encola `event.updated` con el evento completo. Si cambió la hora de inicio o el
+ * lugar, encola además `event.rescheduled` para que notification avise a los asistentes.
+ * Misma regla que cancelar: solo el creador, y solo un evento publicado que no ha terminado.
+ */
+export async function updateEvent(id, userId, changes, correlationId) {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(`${SELECT_EVENT} WHERE id = $1 FOR UPDATE`, [id]);
+    const current = rows[0];
+
+    const denied = ownershipError(current, userId);
+    if (denied) return { outcome: denied };
+    if (current.status !== 'published' || current.ends_at <= new Date()) return { outcome: 'conflict' };
+
+    const before = toApi(current);
+    const after = { ...before, ...changes };
+    // Mismo formato que toApi, para comparar fechas sin importar cómo llegaron escritas.
+    after.startsAt = new Date(after.startsAt).toISOString();
+    after.endsAt = new Date(after.endsAt).toISOString();
+    if (after.endsAt <= after.startsAt) return { outcome: 'invalid_dates' };
+
+    const updated = await client.query(
+      `UPDATE events SET
+         title = $2, description = $3, description_ai_generated = $4, category = $5,
+         starts_at = $6, ends_at = $7, venue_name = $8, venue_address = $9,
+         venue_location = ST_SetSRID(ST_MakePoint($10, $11), 4326), capacity = $12,
+         version = version + 1, updated_at = now()
+       WHERE id = $1
+       RETURNING *,
+         ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat`,
+      [
+        id,
+        after.title,
+        after.description,
+        after.descriptionAiGenerated,
+        after.category,
+        after.startsAt,
+        after.endsAt,
+        after.venue.name,
+        after.venue.address,
+        after.venue.location.lng,
+        after.venue.location.lat,
+        after.capacity,
+      ],
+    );
+    const event = toApi(updated.rows[0]);
+
+    await enqueue(client, { exchange: 'festa.event', routingKey: 'event.updated', payload: event, correlationId });
+    if (isRescheduled(before, after)) {
+      await enqueue(client, {
+        exchange: 'festa.event',
+        routingKey: 'event.rescheduled',
+        payload: toRescheduledMessage(before, event),
+        correlationId,
+      });
+    }
+
+    return { outcome: 'updated', event };
+  });
 }

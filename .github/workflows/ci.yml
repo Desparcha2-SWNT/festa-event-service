@@ -36,6 +36,15 @@ jobs:
     permissions:
       contents: read
       checks: write
+    # PostgreSQL + PostGIS real para la prueba de integración (test/integration.test.js).
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: event_it
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -62,6 +71,7 @@ jobs:
         run: npm run test:ci
         env:
           FESTA_CONTRACTS_DIR: ${{ github.workspace }}/.festa-infra/contracts
+          TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/event_it
 
       - name: Publicar resultados de pruebas en el PR
         if: always()
