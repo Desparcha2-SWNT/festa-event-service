@@ -17,8 +17,10 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
 
   const tick = async () => {
     if (stopped) return;
-    const client = await pool.connect();
+    let client = null;
     try {
+      // Dentro del try: si no hay conexión, el error se registra y el siguiente tick sigue programado.
+      client = await pool.connect();
       const channel = await channelPromise;
       await client.query('BEGIN');
       const { rows } = await client.query(
@@ -61,15 +63,16 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
       }
       await client.query('COMMIT');
     } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
+      await client?.query('ROLLBACK').catch(() => {});
       logger.error(err, 'fallo publicando el outbox, se reintenta en el siguiente tick');
       channelPromise = connection.createConfirmChannel();
     } finally {
-      client.release();
+      client?.release();
       if (!stopped) setTimeout(tick, intervalMs);
     }
   };
 
-  tick();
+  // tick nunca rechaza (todo su cuerpo va en try/catch), así que la promesa se ignora a propósito.
+  void tick();
   return { stop: () => { stopped = true; } };
 }
