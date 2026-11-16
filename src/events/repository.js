@@ -134,3 +134,58 @@ export async function isMerchantOwnedAndVerified(merchantId, userId) {
   );
   return rows.length > 0;
 }
+
+/**
+ * Regla de SCRUM-69: solo quien creó el evento puede editarlo o cancelarlo. Devuelve el motivo
+ * por el que `userId` no puede tocar la fila, o null si puede. La edición (SCRUM-67) usa la misma regla.
+ */
+export function ownershipError(row, userId) {
+  if (!row) return 'not_found';
+  if (row.organizer_id !== userId) return 'forbidden';
+  return null;
+}
+
+export function toCancelledMessage(event, reason) {
+  return {
+    eventId: event.eventId,
+    organizerId: event.organizerId,
+    title: event.title,
+    reason,
+    cancelledAt: event.updatedAt,
+    version: event.version,
+  };
+}
+
+/**
+ * Cancela el evento y, en la misma transacción, encola `event.cancelled` (booking revoca los pases
+ * y payment pide los reembolsos). El FOR UPDATE evita que dos cancelaciones simultáneas publiquen
+ * el mensaje dos veces. Solo se cancela un evento publicado que aún no ha terminado.
+ */
+export async function cancelEvent(id, userId, reason, correlationId) {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query('SELECT * FROM events WHERE id = $1 FOR UPDATE', [id]);
+    const current = rows[0];
+
+    const denied = ownershipError(current, userId);
+    if (denied) return { outcome: denied };
+    if (current.status !== 'published' || current.ends_at <= new Date()) return { outcome: 'conflict' };
+
+    const updated = await client.query(
+      `UPDATE events SET status = 'cancelled', version = version + 1, updated_at = now()
+       WHERE id = $1
+       RETURNING *,
+         ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat`,
+      [id],
+    );
+    const event = toApi(updated.rows[0]);
+
+    await enqueue(client, {
+      exchange: 'festa.event',
+      routingKey: 'event.cancelled',
+      payload: toCancelledMessage(event, reason),
+      correlationId,
+    });
+
+    return { outcome: 'cancelled', event };
+  });
+}
