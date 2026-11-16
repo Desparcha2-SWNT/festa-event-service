@@ -18,10 +18,11 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
   const tick = async () => {
     if (stopped) return;
     let client = null;
+    let channel = null;
     try {
       // Dentro del try: si no hay conexión, el error se registra y el siguiente tick sigue programado.
       client = await pool.connect();
-      const channel = await channelPromise;
+      channel = await channelPromise;
       await client.query('BEGIN');
       const { rows } = await client.query(
         `SELECT id, event_id, correlation_id, causation_id, exchange, routing_key, payload FROM outbox
@@ -65,7 +66,14 @@ export function startOutboxPublisher(connection, { intervalMs = 2000 } = {}) {
     } catch (err) {
       await client?.query('ROLLBACK').catch(() => {});
       logger.error(err, 'fallo publicando el outbox, se reintenta en el siguiente tick');
-      channelPromise = connection.createConfirmChannel();
+      // Solo se reemplaza el canal si el fallo fue con el canal (al publicar o al crearlo). Un fallo de base
+      // no lo toca: antes cada tick fallido abría un canal nuevo sin cerrar el anterior.
+      if (channel) {
+        Promise.resolve().then(() => channel.close()).catch(() => {});
+        channelPromise = connection.createConfirmChannel();
+      } else if (client) {
+        channelPromise = connection.createConfirmChannel();
+      }
     } finally {
       client?.release();
       if (!stopped) setTimeout(tick, intervalMs);

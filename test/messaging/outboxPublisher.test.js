@@ -20,4 +20,16 @@ describe('startOutboxPublisher', () => {
     expect(db.connect.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(client.release).toHaveBeenCalled();
   });
+
+  it('si la base cae varias veces, no abre canales AMQP nuevos por cada fallo', async () => {
+    db.connect.mockReset().mockRejectedValue(new Error('db caída'));
+    const connection = { createConfirmChannel: vi.fn(async () => ({ publish: vi.fn(), close: vi.fn(async () => {}) })) };
+
+    const publisher = startOutboxPublisher(connection, { intervalMs: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    publisher.stop();
+
+    expect(db.connect.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(connection.createConfirmChannel).toHaveBeenCalledTimes(1);
+  });
 });
