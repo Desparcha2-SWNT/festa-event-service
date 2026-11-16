@@ -56,3 +56,12 @@ describe('createEventSchema', () => {
     expect(result.data.descriptionAiGenerated).toBe(false);
   });
 });
+
+describe('Parche en Vivo que ya terminó', () => {
+  it('rechaza un parche que empezó hace 10 minutos y terminó hace 5', () => {
+    const minutesAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
+    const result = createEventSchema.safeParse({ ...base, isLive: true, startsAt: minutesAgo(10), endsAt: minutesAgo(5) });
+    expect(result.success).toBe(false);
+    expect(result.error.issues.map((i) => i.message)).toContain('el evento ya terminó');
+  });
+});

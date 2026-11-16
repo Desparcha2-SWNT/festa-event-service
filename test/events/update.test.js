@@ -139,9 +139,59 @@ describe('PATCH /events/:id', () => {
 
   it('la misma hora escrita de otra forma no cuenta como reprogramación', async () => {
     dbReturns(row);
-    await edit(OWNER_ID, { startsAt: '2099-01-01T01:00:00Z', capacity: 40 });
+    h.query.mockResolvedValueOnce({ rows: [{ capacity: 40, sold_out_at: null, prev_sold_out_at: null }] });
+    const res = await edit(OWNER_ID, { startsAt: '2099-01-01T01:00:00Z', capacity: 40 });
 
+    expect(res.status).toBe(200);
     expect(routingKeys()).toEqual(['event.updated']);
+  });
+
+  it('bajar el cupo hasta el conteo actual publica event.sold_out en la misma transacción', async () => {
+    dbReturns({ ...row, attendee_count: 20 }, { capacity: 20 });
+    const soldOutAt = new Date('2026-11-16T10:00:00Z');
+    h.query.mockResolvedValueOnce({ rows: [{ capacity: 20, sold_out_at: soldOutAt, prev_sold_out_at: null }] });
+    const res = await edit(OWNER_ID, { capacity: 20 });
+
+    expect(res.status).toBe(200);
+    expect(h.query.mock.calls[2][0]).toContain('sold_out_at');
+    expect(routingKeys()).toEqual(['event.updated', 'event.sold_out']);
+    expect(h.enqueue.mock.calls[1][1].payload).toEqual({ eventId: EVENT_ID, capacity: 20, soldOutAt: soldOutAt.toISOString() });
+  });
+
+  it('sin cambio de cupo no se toca sold_out_at', async () => {
+    dbReturns(row, { title: 'Otro título' });
+    await edit(OWNER_ID, { title: 'Otro título' });
+    expect(h.query).toHaveBeenCalledTimes(2);
+  });
+
+  describe('revalida el evento resultante con las reglas de creación', () => {
+    const hoursFromNow = (h) => new Date(Date.now() + h * 3600_000);
+    const runningLive = { ...row, is_live: true, starts_at: hoursFromNow(-1), ends_at: hoursFromNow(2) };
+
+    it.each([
+      ['mover un evento al pasado', row, { startsAt: '2020-01-01T01:00:00Z', endsAt: '2020-01-01T03:00:00Z' }, 'el evento ya terminó'],
+      ['alargar un Parche en Vivo a más de 8 horas', runningLive, { endsAt: hoursFromNow(8).toISOString() }, 'un Parche en Vivo dura máximo 8 horas'],
+      [
+        'mover un Parche en Vivo a dentro de 2 días',
+        runningLive,
+        { startsAt: hoursFromNow(48).toISOString(), endsAt: hoursFromNow(50).toISOString() },
+        'un Parche en Vivo debe empezar en menos de 2 horas',
+      ],
+    ])('rechaza %s sin guardar ni publicar', async (_name, current, body, error) => {
+      h.query.mockResolvedValueOnce({ rows: [current] });
+      const res = await edit(OWNER_ID, body);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(error);
+      expect(h.query).toHaveBeenCalledTimes(1);
+      expect(h.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('editar el título de un Parche en Vivo que ya empezó sigue permitido', async () => {
+      dbReturns(runningLive, { title: 'Jam en la plaza' });
+      const res = await edit(OWNER_ID, { title: 'Jam en la plaza' });
+      expect(res.status).toBe(200);
+    });
   });
 
   it('rechaza que el evento termine antes de empezar, combinando con lo guardado', async () => {

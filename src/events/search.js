@@ -53,10 +53,11 @@ function buildFilters(p) {
   if (p.from) where.push(`ends_at >= ${add(p.from)}`);
   if (p.to) where.push(`starts_at <= ${add(p.to)}`);
   if (p.live === 'true') where.push('is_live');
-  if (p.free === 'true') where.push('NOT ticketed');
+  // Gratis = entrada en $0, con o sin boleta (un evento ticketed de precio 0 también es gratis).
+  if (p.free === 'true') where.push('price_cents = 0');
   if (p.q) {
     const like = add(`%${p.q.replace(/[%_\\]/g, (c) => `\\${c}`)}%`);
-    where.push(`(title ILIKE ${like} OR venue_name ILIKE ${like} OR organizer_name ILIKE ${like} OR ${add(p.q.toLowerCase())} = ANY(tags))`);
+    where.push(`(title ILIKE ${like} OR venue_name ILIKE ${like} OR organizer_name ILIKE ${like} OR EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE lower(tag) = ${add(p.q.toLowerCase())}))`);
   }
   return { where: where.join(' AND '), params, add };
 }

@@ -79,14 +79,17 @@ const handlers = {
   },
 
   // RF7: conteo de asistentes (y event.sold_out si se llena).
-  'attendance.confirmed': (data, client, envelope) => applyAttendeeCount(client, data.eventId, data.attendeeCount, envelope.eventId),
-  'attendance.cancelled': (data, client, envelope) => applyAttendeeCount(client, data.eventId, data.attendeeCount, envelope.eventId),
+  // El conteo se ordena por la hora en que booking lo cambió: un mensaje viejo no pisa uno nuevo.
+  'attendance.confirmed': (data, client, envelope) =>
+    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.confirmedAt, envelope.eventId),
+  'attendance.cancelled': (data, client, envelope) =>
+    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.cancelledAt, envelope.eventId),
 
   // RF14: moderación manual del equipo (user-service).
   'moderation.event_hidden': (data, client, envelope) => moderation.hideEvent(client, data.eventId, envelope.eventId),
   'moderation.event_restored': (data, client, envelope) => moderation.restoreEvent(client, data.eventId, envelope.eventId),
-  'moderation.user_suspended': (data, client, envelope) => moderation.hideUserEvents(client, data.userId, envelope.eventId),
-  'moderation.user_reinstated': (data, client, envelope) => moderation.restoreUserEvents(client, data.userId, envelope.eventId),
+  'moderation.user_suspended': (data, client, envelope) => moderation.hideUserEvents(client, data, envelope.eventId),
+  'moderation.user_reinstated': (data, client, envelope) => moderation.restoreUserEvents(client, data, envelope.eventId),
 
   'merchant.updated': (data, client, envelope) => renameMerchant(client, data, envelope.eventId),
 };

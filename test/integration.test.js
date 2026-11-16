@@ -138,6 +138,81 @@ describe.skipIf(!DB || !hasContracts)('event-service con PostGIS', () => {
     expect((await auth(api().get('/events'))).body.items).toHaveLength(2);
   });
 
+  it('RF7: un attendance.* atrasado no pisa un conteo más nuevo ni limpia sold_out', async () => {
+    const cancelled = (attendeeCount, cancelledAt) =>
+      run('attendance.cancelled', { attendanceId: crypto.randomUUID(), eventId: futbolId, userId: ORGANIZER, reason: 'user', revokedPassIds: [], attendeeCount, cancelledAt });
+    await cancelled(0, new Date(Date.now() - 3600_000).toISOString());
+    expect((await auth(api().get(`/events/${futbolId}`))).body).toMatchObject({ attendeeCount: 2, soldOut: true });
+
+    await cancelled(1, new Date().toISOString());
+    expect((await auth(api().get(`/events/${futbolId}`))).body).toMatchObject({ attendeeCount: 1, soldOut: false });
+  });
+
+  it('PATCH del cupo reconcilia sold_out: bajarlo al conteo avisa; subirlo libera y el siguiente llenado vuelve a avisar', async () => {
+    expect((await auth(api().patch(`/events/${futbolId}`)).send({ capacity: 1 })).status).toBe(200);
+    expect(await outbox('event.sold_out')).toHaveLength(2);
+    expect((await pool.query('SELECT sold_out_at FROM events WHERE id = $1', [futbolId])).rows[0].sold_out_at).not.toBeNull();
+
+    expect((await auth(api().patch(`/events/${futbolId}`)).send({ capacity: 2 })).status).toBe(200);
+    expect((await pool.query('SELECT sold_out_at FROM events WHERE id = $1', [futbolId])).rows[0].sold_out_at).toBeNull();
+    await run('attendance.confirmed', { attendanceId: crypto.randomUUID(), eventId: futbolId, eventTitle: 'x', eventStartsAt: inHours(24), userId: ORGANIZER, source: 'rsvp', passIds: [crypto.randomUUID()], attendeeCount: 2, confirmedAt: new Date().toISOString() });
+    expect(await outbox('event.sold_out')).toHaveLength(3);
+  });
+
+  it('PATCH revalida: no deja mover un evento al pasado ni alargar un parche a más de 8 h', async () => {
+    const past = await auth(api().patch(`/events/${futbolId}`)).send({ startsAt: '2020-01-01T00:00:00Z', endsAt: '2020-01-01T02:00:00Z' });
+    expect(past.status).toBe(400);
+    const long = await auth(api().patch(`/events/${jazzId}`)).send({ endsAt: inHours(12) });
+    expect(long.status).toBe(400);
+    expect(long.body.error).toBe('un Parche en Vivo dura máximo 8 horas');
+  });
+
+  it('RF14: ocultar el evento y suspender al organizador son restricciones independientes', async () => {
+    const visible = async () => (await auth(api().get('/events'))).body.items.map((e) => e.eventId);
+    const decided = (offsetMs = 0) => ({ userId: ORGANIZER, reason: 'x', decidedBy: ORGANIZER, decidedAt: new Date(Date.now() + offsetMs).toISOString() });
+
+    // Ocultado por decisión sobre el evento: reactivar la cuenta no lo devuelve.
+    await run('moderation.event_hidden', { eventId: futbolId, reason: 'spam', decidedBy: ORGANIZER, decidedAt: new Date().toISOString() });
+    await run('moderation.user_suspended', decided());
+    await run('moderation.user_reinstated', decided(1));
+    expect(await visible()).toEqual(expect.not.arrayContaining([futbolId]));
+    expect(await visible()).toContain(jazzId);
+
+    // Restaurar el evento mientras su organizador sigue suspendido no lo publica.
+    await run('moderation.user_suspended', decided(2));
+    await run('moderation.event_restored', { eventId: futbolId, decidedBy: ORGANIZER, decidedAt: new Date().toISOString() });
+    expect(await visible()).toEqual([]);
+    await run('moderation.user_reinstated', decided(3));
+    expect(await visible()).toEqual(expect.arrayContaining([futbolId, jazzId]));
+  });
+
+  it('RF14: una cuenta suspendida no crea eventos aunque su JWT siga vigente; una reactivación atrasada se ignora', async () => {
+    const decided = (offsetMs) => ({ userId: ORGANIZER, reason: 'x', decidedBy: ORGANIZER, decidedAt: new Date(Date.now() + offsetMs).toISOString() });
+    await run('moderation.user_suspended', decided(10_000));
+    expect((await create()).status).toBe(403);
+
+    await run('moderation.user_reinstated', decided(-3600_000));
+    expect((await create()).status).toBe(403);
+    expect((await auth(api().get('/events'))).body.items).toHaveLength(0);
+
+    await run('moderation.user_reinstated', decided(20_000));
+    const created = await create({ title: 'Tarde de Jazz', tags: ['Jazz', 'Vinilo'] });
+    expect(created.status).toBe(201);
+  });
+
+  it('RF6: la etiqueta se busca sin importar mayúsculas y "gratis" incluye boletas de precio 0', async () => {
+    for (const q of ['jazz', 'JAZZ', 'Vinilo']) {
+      const res = await auth(api().get('/events').query({ q }));
+      expect(res.body.items.map((e) => e.title), q).toContain('Tarde de Jazz');
+    }
+
+    await pool.query(`UPDATE events SET organizer_type = 'merchant', merchant_id = gen_random_uuid(), ticketed = true, price_cents = 0 WHERE id = $1`, [futbolId]);
+    const free = await auth(api().get('/events').query({ free: 'true' }));
+    expect(free.body.items.map((e) => e.eventId)).toContain(futbolId);
+    const clusters = await auth(api().get('/events/clusters').query({ zoom: 3, free: 'true' }));
+    expect(clusters.body.items.reduce((n, c) => n + c.count, 0)).toBe(3);
+  });
+
   it('engagement: vistas y compartidos', async () => {
     expect((await auth(api().post(`/events/${jazzId}/views`)).send({ source: 'map' })).status).toBe(202);
     const share = await auth(api().post(`/events/${jazzId}/shares`));

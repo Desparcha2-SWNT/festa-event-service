@@ -1,5 +1,7 @@
 import { pool, withTransaction } from '../db/pool.js';
 import { enqueue } from '../messaging/outboxRepository.js';
+import { isSuspended, lockOrganizer, reconcileSoldOut } from './lifecycle.js';
+import { scheduleError } from './validation.js';
 
 function toRow(input) {
   return {
@@ -67,6 +69,11 @@ export function toApi(row) {
 export async function createEvent(input, organizerId, correlationId) {
   const r = toRow(input);
   return withTransaction(async (client) => {
+    // RF14: el JWT de una cuenta suspendida sigue vigente hasta vencer; la suspensión se consulta en
+    // la proyección local, con el mismo candado que usa moderation.user_suspended (ver lockOrganizer).
+    await lockOrganizer(client, organizerId);
+    if (await isSuspended(client, organizerId)) return { outcome: 'suspended' };
+
     const { rows } = await client.query(
       `INSERT INTO events (
          organizer_id, organizer_type, merchant_id, organizer_name, title, description,
@@ -109,7 +116,7 @@ export async function createEvent(input, organizerId, correlationId) {
 
     await enqueue(client, { exchange: 'festa.event', routingKey: 'event.published', payload: api, correlationId });
 
-    return api;
+    return { outcome: 'created', event: api };
   });
 }
 
@@ -257,7 +264,10 @@ export async function updateEvent(id, userId, changes, correlationId) {
     // Mismo formato que toApi, para comparar fechas sin importar cómo llegaron escritas.
     after.startsAt = new Date(after.startsAt).toISOString();
     after.endsAt = new Date(after.endsAt).toISOString();
-    if (after.endsAt <= after.startsAt) return { outcome: 'invalid_dates' };
+    // Se revalida el evento resultante con las reglas de creación (fin en el futuro; si es Parche en
+    // Vivo, duración máxima y, si cambió el inicio, la ventana de 2 horas).
+    const invalid = scheduleError(after, { checkLiveStart: after.startsAt !== before.startsAt });
+    if (invalid) return { outcome: 'invalid_dates', error: invalid };
 
     const updated = await client.query(
       `UPDATE events SET
@@ -286,6 +296,9 @@ export async function updateEvent(id, userId, changes, correlationId) {
     const event = toApi(updated.rows[0]);
 
     await enqueue(client, { exchange: 'festa.event', routingKey: 'event.updated', payload: event, correlationId });
+    // Cambiar el cupo puede llenar o liberar el evento: se reconcilia sold_out_at con el conteo
+    // guardado en la misma transacción (y se publica event.sold_out si con el nuevo cupo queda lleno).
+    if (after.capacity !== before.capacity) await reconcileSoldOut(client, id, { correlationId });
     if (isRescheduled(before, after)) {
       await enqueue(client, {
         exchange: 'festa.event',

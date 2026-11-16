@@ -10,6 +10,22 @@ export function isWithinLiveWindow(startsAt, now = Date.now()) {
   return t >= now - LIVE_PAST_TOLERANCE_MS && t <= now + LIVE_WINDOW_MS;
 }
 
+/**
+ * Reglas de fechas que debe cumplir el evento COMPLETO, al crearlo y después de combinar un PATCH con
+ * lo guardado (en el PATCH puede llegar solo startsAt o solo endsAt). La ventana de inicio de un Parche
+ * en Vivo se exige solo si cambia startsAt: editar el título de un parche que ya empezó sigue permitido.
+ * Devuelve el mensaje del primer error o null.
+ */
+export function scheduleError(e, { checkLiveStart = true, now = Date.now() } = {}) {
+  const start = new Date(e.startsAt).getTime();
+  const end = new Date(e.endsAt).getTime();
+  if (end <= start) return 'endsAt debe ser posterior a startsAt';
+  if (end <= now) return 'el evento ya terminó';
+  if (e.isLive && checkLiveStart && !isWithinLiveWindow(e.startsAt, now)) return 'un Parche en Vivo debe empezar en menos de 2 horas';
+  if (e.isLive && end - start > LIVE_MAX_DURATION_MS) return 'un Parche en Vivo dura máximo 8 horas';
+  return null;
+}
+
 const categorySchema = z.enum(['cultural', 'musical', 'deportivo', 'gastronomico']);
 
 const venueSchema = z.object({
@@ -65,7 +81,8 @@ export const createEventSchema = z
     message: 'un Parche en Vivo dura máximo 8 horas',
     path: ['endsAt'],
   })
-  .refine((e) => e.isLive || new Date(e.endsAt) > new Date(), {
+  // También para Parches en Vivo: el inicio tolera unos minutos en el pasado, el final no.
+  .refine((e) => new Date(e.endsAt) > new Date(), {
     message: 'el evento ya terminó',
     path: ['endsAt'],
   })

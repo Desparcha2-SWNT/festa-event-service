@@ -46,8 +46,9 @@ eventsRouter.post('/', requireAuth, async (req, res, next) => {
 
   try {
     const correlationId = req.headers['x-correlation-id'] ?? null;
-    const event = await createEvent(parsed.data, req.auth.userId, correlationId);
-    res.status(201).json(event);
+    const result = await createEvent(parsed.data, req.auth.userId, correlationId);
+    if (result.outcome === 'suspended') return res.status(403).json({ error: 'tu cuenta está suspendida' });
+    res.status(201).json(result.event);
   } catch (err) {
     next(err);
   }
@@ -149,7 +150,7 @@ eventsRouter.patch('/:id', requireAuth, async (req, res, next) => {
     const result = await updateEvent(req.params.id, req.auth.userId, parsed.data, correlationId);
     if (result.outcome !== 'updated') {
       const [status, error] = UPDATE_ERRORS[result.outcome];
-      return res.status(status).json({ error });
+      return res.status(status).json({ error: result.error ?? error });
     }
     res.json(result.event);
   } catch (err) {
