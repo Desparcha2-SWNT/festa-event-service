@@ -189,3 +189,98 @@ export async function cancelEvent(id, userId, reason, correlationId) {
     return { outcome: 'cancelled', event };
   });
 }
+
+const SELECT_EVENT = `SELECT *, ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat
+  FROM events`;
+
+/**
+ * Eventos creados por `userId`, en todos los estados, del más reciente al más antiguo
+ * («Mis eventos» en la app). El límite basta para el piloto; si crece, se pagina.
+ */
+export async function findEventsByOrganizer(userId) {
+  const { rows } = await pool.query(`${SELECT_EVENT} WHERE organizer_id = $1 ORDER BY starts_at DESC LIMIT 100`, [
+    userId,
+  ]);
+  return rows.map(toApi);
+}
+
+/** Cambio crítico para quienes ya confirmaron: otra hora de inicio u otro lugar. */
+function isRescheduled(before, after) {
+  return before.startsAt !== after.startsAt || JSON.stringify(before.venue) !== JSON.stringify(after.venue);
+}
+
+export function toRescheduledMessage(before, event) {
+  return {
+    eventId: event.eventId,
+    title: event.title,
+    previousStartsAt: before.startsAt,
+    startsAt: event.startsAt,
+    endsAt: event.endsAt,
+    previousVenue: before.venue,
+    venue: event.venue,
+    version: event.version,
+    rescheduledAt: event.updatedAt,
+  };
+}
+
+/**
+ * SCRUM-67: aplica `changes` (ya validados con updateEventSchema) al evento y, en la misma
+ * transacción, encola `event.updated` con el evento completo. Si cambió la hora de inicio o el
+ * lugar, encola además `event.rescheduled` para que notification avise a los asistentes.
+ * Misma regla que cancelar: solo el creador, y solo un evento publicado que no ha terminado.
+ */
+export async function updateEvent(id, userId, changes, correlationId) {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(`${SELECT_EVENT} WHERE id = $1 FOR UPDATE`, [id]);
+    const current = rows[0];
+
+    const denied = ownershipError(current, userId);
+    if (denied) return { outcome: denied };
+    if (current.status !== 'published' || current.ends_at <= new Date()) return { outcome: 'conflict' };
+
+    const before = toApi(current);
+    const after = { ...before, ...changes };
+    // Mismo formato que toApi, para comparar fechas sin importar cómo llegaron escritas.
+    after.startsAt = new Date(after.startsAt).toISOString();
+    after.endsAt = new Date(after.endsAt).toISOString();
+    if (after.endsAt <= after.startsAt) return { outcome: 'invalid_dates' };
+
+    const updated = await client.query(
+      `UPDATE events SET
+         title = $2, description = $3, description_ai_generated = $4, category = $5,
+         starts_at = $6, ends_at = $7, venue_name = $8, venue_address = $9,
+         venue_location = ST_SetSRID(ST_MakePoint($10, $11), 4326), capacity = $12,
+         version = version + 1, updated_at = now()
+       WHERE id = $1
+       RETURNING *,
+         ST_X(venue_location::geometry) AS lng, ST_Y(venue_location::geometry) AS lat`,
+      [
+        id,
+        after.title,
+        after.description,
+        after.descriptionAiGenerated,
+        after.category,
+        after.startsAt,
+        after.endsAt,
+        after.venue.name,
+        after.venue.address,
+        after.venue.location.lng,
+        after.venue.location.lat,
+        after.capacity,
+      ],
+    );
+    const event = toApi(updated.rows[0]);
+
+    await enqueue(client, { exchange: 'festa.event', routingKey: 'event.updated', payload: event, correlationId });
+    if (isRescheduled(before, after)) {
+      await enqueue(client, {
+        exchange: 'festa.event',
+        routingKey: 'event.rescheduled',
+        payload: toRescheduledMessage(before, event),
+        correlationId,
+      });
+    }
+
+    return { outcome: 'updated', event };
+  });
+}

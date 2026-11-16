@@ -2,8 +2,15 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
-import { cancelEventSchema, createEventSchema } from './validation.js';
-import { cancelEvent, createEvent, findEventById, isMerchantOwnedAndVerified } from './repository.js';
+import { cancelEventSchema, createEventSchema, updateEventSchema } from './validation.js';
+import {
+  cancelEvent,
+  createEvent,
+  findEventById,
+  findEventsByOrganizer,
+  isMerchantOwnedAndVerified,
+  updateEvent,
+} from './repository.js';
 
 export const eventsRouter = Router();
 
@@ -44,6 +51,16 @@ eventsRouter.post('/', requireAuth, async (req, res, next) => {
   }
 });
 
+// «Mis eventos»: los que creó el usuario autenticado. Va antes de /:id para que «mine» no se
+// tome como un id.
+eventsRouter.get('/mine', requireAuth, async (req, res, next) => {
+  try {
+    res.json({ items: await findEventsByOrganizer(req.auth.userId) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 eventsRouter.get('/:id', requireAuth, async (req, res, next) => {
   const idCheck = z.uuid().safeParse(req.params.id);
   if (!idCheck.success) return res.status(400).json({ error: 'id inválido' });
@@ -77,6 +94,35 @@ eventsRouter.post('/:id/cancel', requireAuth, async (req, res, next) => {
     const result = await cancelEvent(req.params.id, req.auth.userId, parsed.data.reason, correlationId);
     if (result.outcome !== 'cancelled') {
       const [status, error] = CANCEL_ERRORS[result.outcome];
+      return res.status(status).json({ error });
+    }
+    res.json(result.event);
+  } catch (err) {
+    next(err);
+  }
+});
+
+const UPDATE_ERRORS = {
+  not_found: [404, 'evento no encontrado'],
+  forbidden: [403, 'solo quien creó el evento puede editarlo'],
+  conflict: [409, 'el evento ya no se puede editar'],
+  invalid_dates: [400, 'endsAt debe ser posterior a startsAt'],
+};
+
+eventsRouter.patch('/:id', requireAuth, async (req, res, next) => {
+  const idCheck = z.uuid().safeParse(req.params.id);
+  if (!idCheck.success) return res.status(400).json({ error: 'id inválido' });
+
+  const parsed = updateEventSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'cuerpo inválido', issues: z.treeifyError(parsed.error) });
+  }
+
+  try {
+    const correlationId = req.headers['x-correlation-id'] ?? null;
+    const result = await updateEvent(req.params.id, req.auth.userId, parsed.data, correlationId);
+    if (result.outcome !== 'updated') {
+      const [status, error] = UPDATE_ERRORS[result.outcome];
       return res.status(status).json({ error });
     }
     res.json(result.event);
