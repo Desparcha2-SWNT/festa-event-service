@@ -29,9 +29,12 @@ const handlers = {
   // proyección de comercio verificado (si no, el negocio sigue ahí y, aunque la cuenta borrada
   // no pueda volver a autenticarse, el dato de comercio queda retenido sin ningún propósito).
   'account.deleted': async (data, client, envelope) => {
+    // FOR UPDATE: bloquea las filas mientras se cancelan, en orden de id. Así una cancelación concurrente
+    // (cancelEvent) que ya se comprometió se ve aquí como 'cancelled' y no se publica dos veces con la misma versión.
     const { rows: toCancel } = await client.query(
       `SELECT id, title, version FROM events
-       WHERE organizer_id = $1 AND starts_at > now() AND status NOT IN ('cancelled', 'expired')`,
+       WHERE organizer_id = $1 AND starts_at > now() AND status NOT IN ('cancelled', 'expired')
+       ORDER BY id FOR UPDATE`,
       [data.userId],
     );
 
