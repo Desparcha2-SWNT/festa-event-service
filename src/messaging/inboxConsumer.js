@@ -84,9 +84,9 @@ const handlers = {
   // RF7: conteo de asistentes (y event.sold_out si se llena).
   // El conteo se ordena por la hora en que booking lo cambió: un mensaje viejo no pisa uno nuevo.
   'attendance.confirmed': (data, client, envelope) =>
-    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.confirmedAt, envelope.eventId),
+    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.confirmedAt, envelope.eventId, data.attendanceVersion),
   'attendance.cancelled': (data, client, envelope) =>
-    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.cancelledAt, envelope.eventId),
+    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.cancelledAt, envelope.eventId, data.attendanceVersion),
 
   // RF14: moderación manual del equipo (user-service).
   'moderation.event_hidden': (data, client, envelope) => moderation.hideEvent(client, data.eventId, envelope.eventId),

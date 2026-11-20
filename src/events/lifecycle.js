@@ -59,17 +59,21 @@ export async function reconcileSoldOut(client, eventId, { causationId, correlati
 }
 
 /**
- * RF7: booking-service manda el conteo vigente en cada attendance.*, con la hora en que lo cambió
- * (confirmedAt / cancelledAt, de su propia transacción, que bloquea el evento). Los mensajes pueden
- * llegar desordenados o reintentarse tarde: un conteo más viejo que el guardado se ignora, así no
- * pisa uno más nuevo ni limpia sold_out_at.
+ * RF7: booking-service manda el conteo vigente en cada attendance.* con `attendanceVersion`, una versión
+ * monotónica por evento que booking sube en cada cambio. Los mensajes pueden llegar desordenados o
+ * reintentarse tarde: solo se aplica una versión mayor que la guardada, así un conteo viejo no pisa uno
+ * más nuevo ni limpia sold_out_at. La hora (countedAt) ya no decide el orden: dos cambios en el mismo
+ * milisegundo se distinguen por la versión.
  */
-export async function applyAttendeeCount(client, eventId, attendeeCount, countedAt, causationId) {
-  const { rows } = await client.query('SELECT attendee_count_at FROM events WHERE id = $1 FOR UPDATE', [eventId]);
+export async function applyAttendeeCount(client, eventId, attendeeCount, countedAt, causationId, attendanceVersion) {
+  const { rows } = await client.query('SELECT attendee_count_version FROM events WHERE id = $1 FOR UPDATE', [eventId]);
   const event = rows[0];
   if (!event) return;
-  if (event.attendee_count_at && new Date(countedAt) < event.attendee_count_at) return;
-  await client.query('UPDATE events SET attendee_count = $2, attendee_count_at = $3 WHERE id = $1', [eventId, attendeeCount, countedAt]);
+  if (attendanceVersion <= Number(event.attendee_count_version)) return;
+  await client.query(
+    'UPDATE events SET attendee_count = $2, attendee_count_at = $3, attendee_count_version = $4 WHERE id = $1',
+    [eventId, attendeeCount, countedAt, attendanceVersion],
+  );
   await reconcileSoldOut(client, eventId, { causationId });
 }
 
