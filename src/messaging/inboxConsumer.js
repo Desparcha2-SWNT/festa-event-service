@@ -82,7 +82,7 @@ const handlers = {
   },
 
   // RF7: conteo de asistentes (y event.sold_out si se llena).
-  // El conteo se ordena por la hora en que booking lo cambió: un mensaje viejo no pisa uno nuevo.
+  // El conteo se ordena por attendanceVersion (la sube booking en cada cambio): un mensaje viejo no pisa uno nuevo.
   'attendance.confirmed': (data, client, envelope) =>
     applyAttendeeCount(client, data.eventId, data.attendeeCount, data.confirmedAt, envelope.eventId, data.attendanceVersion),
   'attendance.cancelled': (data, client, envelope) =>
