@@ -69,6 +69,8 @@ export async function applyAttendeeCount(client, eventId, attendeeCount, counted
   const { rows } = await client.query('SELECT attendee_count_version FROM events WHERE id = $1 FOR UPDATE', [eventId]);
   const event = rows[0];
   if (!event) return;
+  // El contrato exige attendanceVersion; sin él no hay orden que comparar y no se escribe null en una columna NOT NULL.
+  if (!Number.isInteger(attendanceVersion)) return;
   if (attendanceVersion <= Number(event.attendee_count_version)) return;
   await client.query(
     'UPDATE events SET attendee_count = $2, attendee_count_at = $3, attendee_count_version = $4 WHERE id = $1',

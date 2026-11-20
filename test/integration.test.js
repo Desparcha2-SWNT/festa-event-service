@@ -110,9 +110,9 @@ describe.skipIf(!DB || !hasContracts)('event-service con PostGIS', () => {
 
   it('RF7: el conteo de booking llena el cupo y publica event.sold_out una vez', async () => {
     const base = { attendanceId: crypto.randomUUID(), eventId: futbolId, eventTitle: 'x', eventStartsAt: inHours(24), userId: ORGANIZER, source: 'rsvp', passIds: [crypto.randomUUID()], confirmedAt: new Date().toISOString() };
-    await run('attendance.confirmed', { ...base, attendeeCount: 1 });
-    await run('attendance.confirmed', { ...base, attendeeCount: 2 });
-    await run('attendance.confirmed', { ...base, attendeeCount: 2 });
+    await run('attendance.confirmed', { ...base, attendeeCount: 1, attendanceVersion: 1 });
+    await run('attendance.confirmed', { ...base, attendeeCount: 2, attendanceVersion: 2 });
+    await run('attendance.confirmed', { ...base, attendeeCount: 2, attendanceVersion: 3 });
     const soldOut = await outbox('event.sold_out');
     expect(soldOut).toHaveLength(1);
     expectValid('event.sold_out', soldOut[0]);
@@ -139,12 +139,13 @@ describe.skipIf(!DB || !hasContracts)('event-service con PostGIS', () => {
   });
 
   it('RF7: un attendance.* atrasado no pisa un conteo más nuevo ni limpia sold_out', async () => {
-    const cancelled = (attendeeCount, cancelledAt) =>
-      run('attendance.cancelled', { attendanceId: crypto.randomUUID(), eventId: futbolId, userId: ORGANIZER, reason: 'user', revokedPassIds: [], attendeeCount, cancelledAt });
-    await cancelled(0, new Date(Date.now() - 3600_000).toISOString());
+    // La versión decide el orden, no la hora: un cambio atrasado trae una versión menor que la guardada.
+    const cancelled = (attendeeCount, attendanceVersion, cancelledAt) =>
+      run('attendance.cancelled', { attendanceId: crypto.randomUUID(), eventId: futbolId, userId: ORGANIZER, reason: 'user', revokedPassIds: [], attendeeCount, attendanceVersion, cancelledAt });
+    await cancelled(0, 2, new Date(Date.now() - 3600_000).toISOString());
     expect((await auth(api().get(`/events/${futbolId}`))).body).toMatchObject({ attendeeCount: 2, soldOut: true });
 
-    await cancelled(1, new Date().toISOString());
+    await cancelled(1, 4, new Date().toISOString());
     expect((await auth(api().get(`/events/${futbolId}`))).body).toMatchObject({ attendeeCount: 1, soldOut: false });
   });
 
@@ -155,7 +156,7 @@ describe.skipIf(!DB || !hasContracts)('event-service con PostGIS', () => {
 
     expect((await auth(api().patch(`/events/${futbolId}`)).send({ capacity: 2 })).status).toBe(200);
     expect((await pool.query('SELECT sold_out_at FROM events WHERE id = $1', [futbolId])).rows[0].sold_out_at).toBeNull();
-    await run('attendance.confirmed', { attendanceId: crypto.randomUUID(), eventId: futbolId, eventTitle: 'x', eventStartsAt: inHours(24), userId: ORGANIZER, source: 'rsvp', passIds: [crypto.randomUUID()], attendeeCount: 2, confirmedAt: new Date().toISOString() });
+    await run('attendance.confirmed', { attendanceId: crypto.randomUUID(), eventId: futbolId, eventTitle: 'x', eventStartsAt: inHours(24), userId: ORGANIZER, source: 'rsvp', passIds: [crypto.randomUUID()], attendeeCount: 2, attendanceVersion: 5, confirmedAt: new Date().toISOString() });
     expect(await outbox('event.sold_out')).toHaveLength(3);
   });
 
