@@ -2,10 +2,41 @@
 
 RF4, RF5, RF6, RF19: CRUD de eventos, mapa, filtros, Parches en Vivo.
 
-Hoy (SCRUM-64) tiene el esqueleto del servicio y lo mínimo de RF4: crear un evento y leerlo
-por id. El resto (editar/cancelar, búsqueda, mapa, clústeres, Parches en Vivo) son historias
-aparte — ver el catálogo completo en Jira bajo [SCRUM-7 "Gestión de eventos"](https://desparcha2.atlassian.net/browse/SCRUM-7)
-y [SCRUM-8 "Mapa y descubrimiento"](https://desparcha2.atlassian.net/browse/SCRUM-8).
+## API
+
+Montada en `/events`; el cliente la llama como `/api/events` a través del gateway. Todas las rutas exigen JWT.
+
+| Método y ruta | Qué hace |
+|---|---|
+| `POST /events` | Crea un evento (SCRUM-64). Con `organizerType: merchant` exige un comercio verificado y propio. |
+| `GET /events` | RF5/RF6: eventos activos y próximos para el mapa y la búsqueda. Filtros: `bbox=minLng,minLat,maxLng,maxLat` **o** `lat`,`lng`,`radiusKm`; `category=musical,cultural`; `from`/`to`; `q` (título, lugar, organizador, etiqueta); `live=true` (solo Parches en Vivo); `free=true`; `limit` (≤ 500). Incluye `attendeeCount`, `soldOut`, `happeningNow` y `distanceMeters` |
+| `GET /events/clusters?zoom=12&…` | RF5: clústeres por zona (mismos filtros) para el mapa alejado |
+| `POST /events/:id/views` `{source}` | Registra que alguien abrió el detalle (`engagement.viewed`), para el panel del comercio |
+| `POST /events/:id/shares` | RF13: registra el compartido (`engagement.shared`) y devuelve `shareUrl` (`PUBLIC_SHARE_BASE_URL`) |
+| `GET /events/mine` | Eventos creados por el usuario autenticado, en todos los estados, del más reciente al más antiguo. |
+| `GET /events/:id` | Un evento por id. |
+| `PATCH /events/:id` | Edita un evento (SCRUM-67). Solo se envían los campos que cambian: `title`, `description`, `descriptionAiGenerated`, `category`, `startsAt`, `endsAt`, `venue`, `capacity`. Publica `event.updated` y, si cambia la hora de inicio o el lugar, también `event.rescheduled` para avisar a los asistentes. |
+| `POST /events/:id/cancel` | Cancela un evento (SCRUM-68) y publica `event.cancelled`. |
+
+Editar y cancelar siguen la misma regla (SCRUM-69): solo el creador (403 para los demás) y solo un evento
+publicado que no ha terminado (409 si no). El tipo de organizador, el comercio, la boletería y el precio no se
+editan, porque de ellos dependen pagos y pases ya emitidos.
+
+### Parches en Vivo (RF19)
+
+`POST /events` con `isLive: true` exige que empiece en menos de 2 horas (se toleran 15 min en el pasado) y que dure
+máximo 8 horas. Un job cada minuto expira todo evento que terminó (`status = expired`, `event.expired`), así los
+parches desaparecen solos del mapa; booking cierra el check-in y payment la venta.
+
+### Lo que consume
+
+| Mensaje | Efecto |
+|---|---|
+| `attendance.confirmed` / `attendance.cancelled` | `attendeeCount` vigente; si se llena el cupo publica `event.sold_out` (una vez) |
+| `moderation.event_hidden` / `event_restored` | Oculta o vuelve a mostrar el evento (`event.updated`) |
+| `moderation.user_suspended` / `user_reinstated` | Oculta los eventos vigentes del organizador y al reactivarlo devuelve solo esos |
+| `merchant.verified` / `merchant.updated` | Comercios verificados; el nuevo nombre se refleja en sus eventos vigentes |
+| `account.deleted` | Cancela sus eventos futuros y anonimiza el organizador (Ley 1581) |
 
 ## Arranque local
 
@@ -58,6 +89,7 @@ desde `festa-infra`.
 
 ```bash
 npm test
+TEST_DATABASE_URL=postgres://postgres:test@localhost:5432/event_it npm test   # + integración con PostGIS
 ```
 
 La prueba de contrato (`test/contract.test.js`) valida que lo que arma este servicio para

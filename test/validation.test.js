@@ -8,8 +8,8 @@ const base = {
   title: 'Noche de jazz',
   description: 'Una noche de jazz en vivo.',
   category: 'musical',
-  startsAt: '2026-11-07T01:00:00Z',
-  endsAt: '2026-11-07T04:00:00Z',
+  startsAt: '2099-11-07T01:00:00Z',
+  endsAt: '2099-11-07T04:00:00Z',
   venue: { name: 'Café Bohemio', address: 'Cl. 11 #3-45, Bogotá', location: { lat: 4.5981, lng: -74.0758 } },
   ticketed: true,
   priceCents: 2500000,
@@ -21,7 +21,7 @@ describe('createEventSchema', () => {
   });
 
   it('rechaza endsAt antes de startsAt', () => {
-    const result = createEventSchema.safeParse({ ...base, endsAt: '2026-11-06T00:00:00Z' });
+    const result = createEventSchema.safeParse({ ...base, endsAt: '2099-11-06T00:00:00Z' });
     expect(result.success).toBe(false);
   });
 
@@ -54,5 +54,14 @@ describe('createEventSchema', () => {
     const result = createEventSchema.safeParse(base);
     expect(result.data.tags).toEqual([]);
     expect(result.data.descriptionAiGenerated).toBe(false);
+  });
+});
+
+describe('Parche en Vivo que ya terminó', () => {
+  it('rechaza un parche que empezó hace 10 minutos y terminó hace 5', () => {
+    const minutesAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
+    const result = createEventSchema.safeParse({ ...base, isLive: true, startsAt: minutesAgo(10), endsAt: minutesAgo(5) });
+    expect(result.success).toBe(false);
+    expect(result.error.issues.map((i) => i.message)).toContain('el evento ya terminó');
   });
 });

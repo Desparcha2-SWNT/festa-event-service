@@ -4,6 +4,7 @@ import { logger } from '../logger.js';
 import { getSchemaRegistry } from './schemaRegistry.js';
 import { enqueue } from './outboxRepository.js';
 import { toApi } from '../events/repository.js';
+import { applyAttendeeCount, moderation, renameMerchant } from '../events/lifecycle.js';
 
 const QUEUE = 'event-service.inbox';
 const RETRY_QUEUE = 'event-service.inbox.retry';
@@ -28,9 +29,12 @@ const handlers = {
   // proyección de comercio verificado (si no, el negocio sigue ahí y, aunque la cuenta borrada
   // no pueda volver a autenticarse, el dato de comercio queda retenido sin ningún propósito).
   'account.deleted': async (data, client, envelope) => {
+    // FOR UPDATE: bloquea las filas mientras se cancelan, en orden de id. Así una cancelación concurrente
+    // (cancelEvent) que ya se comprometió se ve aquí como 'cancelled' y no se publica dos veces con la misma versión.
     const { rows: toCancel } = await client.query(
       `SELECT id, title, version FROM events
-       WHERE organizer_id = $1 AND starts_at > now() AND status NOT IN ('cancelled', 'expired')`,
+       WHERE organizer_id = $1 AND starts_at > now() AND status NOT IN ('cancelled', 'expired')
+       ORDER BY id FOR UPDATE`,
       [data.userId],
     );
 
@@ -76,6 +80,21 @@ const handlers = {
 
     await client.query('DELETE FROM verified_merchants WHERE user_id = $1', [data.userId]);
   },
+
+  // RF7: conteo de asistentes (y event.sold_out si se llena).
+  // El conteo se ordena por attendanceVersion (la sube booking en cada cambio): un mensaje viejo no pisa uno nuevo.
+  'attendance.confirmed': (data, client, envelope) =>
+    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.confirmedAt, envelope.eventId, data.attendanceVersion),
+  'attendance.cancelled': (data, client, envelope) =>
+    applyAttendeeCount(client, data.eventId, data.attendeeCount, data.cancelledAt, envelope.eventId, data.attendanceVersion),
+
+  // RF14: moderación manual del equipo (user-service).
+  'moderation.event_hidden': (data, client, envelope) => moderation.hideEvent(client, data.eventId, envelope.eventId),
+  'moderation.event_restored': (data, client, envelope) => moderation.restoreEvent(client, data.eventId, envelope.eventId),
+  'moderation.user_suspended': (data, client, envelope) => moderation.hideUserEvents(client, data, envelope.eventId),
+  'moderation.user_reinstated': (data, client, envelope) => moderation.restoreUserEvents(client, data, envelope.eventId),
+
+  'merchant.updated': (data, client, envelope) => renameMerchant(client, data, envelope.eventId),
 };
 
 /**
