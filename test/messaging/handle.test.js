@@ -79,11 +79,11 @@ describe('handle (despacho del inbox)', () => {
     expect(channel.nack).toHaveBeenCalledWith(msg, false, false);
   });
 
-  it('confirma sin efecto un eventType válido sin handler todavía (p. ej. attendance.confirmed)', async () => {
+  it('confirma sin efecto un eventType válido sin handler (p. ej. pass.checked_in)', async () => {
     const channel = fakeChannel();
     const dataValidator = vi.fn().mockReturnValue(true);
     const registry = fakeRegistry({ expectedProducer: 'booking-service', expectedExchange: 'festa.booking', dataValidator });
-    const msg = msgWith({ eventId: '1', eventType: 'attendance.confirmed', producer: 'booking-service', data: {} }, 'festa.booking');
+    const msg = msgWith({ eventId: '1', eventType: 'pass.checked_in', producer: 'booking-service', data: {} }, 'festa.booking');
 
     await _internal.handle(channel, msg, registry);
 
