@@ -62,7 +62,7 @@ jobs:
           node-version: "20"
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       - name: Linter (ESLint)
         run: npm run lint

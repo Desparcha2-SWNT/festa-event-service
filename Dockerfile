@@ -5,7 +5,7 @@
 FROM node:20-alpine AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 COPY . .
 COPY --from=contracts . /contracts
 # Las pruebas (incluida la de contrato) corren en el build: si fallan, no hay imagen.
