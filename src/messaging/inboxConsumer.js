@@ -19,7 +19,8 @@ const handlers = {
       `INSERT INTO verified_merchants (merchant_id, user_id, business_name, verified_at)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (merchant_id) DO UPDATE
-         SET user_id = EXCLUDED.user_id, business_name = EXCLUDED.business_name, verified_at = EXCLUDED.verified_at`,
+         SET user_id = EXCLUDED.user_id, business_name = EXCLUDED.business_name,
+             verified_at = GREATEST(verified_merchants.verified_at, EXCLUDED.verified_at)`,
       [data.merchantId, data.userId, data.businessName, data.verifiedAt],
     );
   },
@@ -94,7 +95,17 @@ const handlers = {
   'moderation.user_suspended': (data, client, envelope) => moderation.hideUserEvents(client, data, envelope.eventId),
   'moderation.user_reinstated': (data, client, envelope) => moderation.restoreUserEvents(client, data, envelope.eventId),
 
-  'merchant.updated': (data, client, envelope) => renameMerchant(client, data, envelope.eventId),
+  'merchant.updated': async (data, client, envelope) => {
+    // verified=false: un admin rechazó al comercio, o volvió a revisión tras cambiar datos críticos. Deja de
+    // poder crear eventos como comercio hasta un merchant.verified posterior a esta revocación.
+    if (data.verified === false) {
+      await client.query(
+        'UPDATE verified_merchants SET revoked_at = GREATEST(COALESCE(revoked_at, $2), $2) WHERE merchant_id = $1',
+        [data.merchantId, data.updatedAt],
+      );
+    }
+    return renameMerchant(client, data, envelope.eventId);
+  },
 };
 
 /**

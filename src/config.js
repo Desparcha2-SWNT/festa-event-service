@@ -30,5 +30,8 @@ export const config = {
   jwtPublicKeyPath: required('JWT_PUBLIC_KEY_PATH'),
   // En la imagen de Docker el Dockerfile copia los contratos a ./contracts y fija esta
   // variable; en local, por defecto asume festa-infra clonado como hermano de este repo.
+  // Tope de eventos que un organizador puede publicar en 24 h. Cada evento publicado avisa por push a
+  // los usuarios cercanos (notification-service): sin tope, una cuenta podía mandar push sin límite.
+  maxEventsPerOrganizerPerDay: Number(process.env.MAX_EVENTS_PER_ORGANIZER_PER_DAY ?? 10),
   contractsDir: process.env.FESTA_CONTRACTS_DIR ?? path.resolve('../festa-infra/contracts'),
 };

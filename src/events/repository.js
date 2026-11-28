@@ -1,3 +1,4 @@
+import { config } from '../config.js';
 import { pool, withTransaction } from '../db/pool.js';
 import { enqueue } from '../messaging/outboxRepository.js';
 import { isSuspended, lockOrganizer, reconcileSoldOut } from './lifecycle.js';
@@ -73,6 +74,12 @@ export async function createEvent(input, organizerId, correlationId) {
     // la proyección local, con el mismo candado que usa moderation.user_suspended (ver lockOrganizer).
     await lockOrganizer(client, organizerId);
     if (await isSuspended(client, organizerId)) return { outcome: 'suspended' };
+    // Bajo el mismo candado del organizador, así dos POST simultáneos no pasan el tope a la vez.
+    const { rows: recent } = await client.query(
+      `SELECT count(*)::int AS n FROM events WHERE organizer_id = $1 AND created_at > now() - interval '24 hours'`,
+      [organizerId],
+    );
+    if (recent[0].n >= config.maxEventsPerOrganizerPerDay) return { outcome: 'too_many' };
 
     const { rows } = await client.query(
       `INSERT INTO events (
@@ -150,8 +157,25 @@ export function withCounts(row) {
  */
 export async function isMerchantOwnedAndVerified(merchantId, userId) {
   const { rows } = await pool.query(
-    'SELECT 1 FROM verified_merchants WHERE merchant_id = $1 AND user_id = $2',
+    `SELECT 1 FROM verified_merchants
+     WHERE merchant_id = $1 AND user_id = $2 AND (revoked_at IS NULL OR verified_at > revoked_at)`,
     [merchantId, userId],
+  );
+  return rows.length > 0;
+}
+
+/** Nombre del comercio verificado (el que se muestra en sus eventos), o null. */
+export async function verifiedMerchantName(merchantId) {
+  const { rows } = await pool.query('SELECT business_name FROM verified_merchants WHERE merchant_id = $1', [merchantId]);
+  return rows[0]?.business_name ?? null;
+}
+
+/** ¿Hay un comercio verificado vigente con este nombre visible? (sin distinguir mayúsculas ni espacios) */
+export async function isVerifiedMerchantName(name) {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM verified_merchants
+     WHERE lower(business_name) = lower(btrim($1)) AND (revoked_at IS NULL OR verified_at > revoked_at) LIMIT 1`,
+    [name],
   );
   return rows.length > 0;
 }
