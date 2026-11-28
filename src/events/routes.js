@@ -9,7 +9,9 @@ import {
   findEventById,
   findEventsByOrganizer,
   isMerchantOwnedAndVerified,
+  isVerifiedMerchantName,
   updateEvent,
+  verifiedMerchantName,
 } from './repository.js';
 import { clusterEvents, searchEvents, searchSchema } from './search.js';
 import { eventExists, recordEngagement } from './lifecycle.js';
@@ -39,6 +41,17 @@ eventsRouter.post('/', requireAuth, async (req, res, next) => {
       if (!(await isMerchantOwnedAndVerified(parsed.data.merchantId, req.auth.userId))) {
         return res.status(403).json({ error: 'el comercio no está verificado o no es tuyo' });
       }
+      // El nombre visible de un evento de comercio es el del comercio verificado, no el que mande el cliente.
+      parsed.data.organizerName = await verifiedMerchantName(parsed.data.merchantId);
+    } catch (err) {
+      return next(err);
+    }
+  } else {
+    // Un usuario no puede publicar a nombre de un comercio verificado (suplantación en el mapa y en los push).
+    try {
+      if (await isVerifiedMerchantName(parsed.data.organizerName)) {
+        return res.status(409).json({ error: 'ese nombre es de un comercio verificado' });
+      }
     } catch (err) {
       return next(err);
     }
@@ -48,6 +61,7 @@ eventsRouter.post('/', requireAuth, async (req, res, next) => {
     const correlationId = req.headers['x-correlation-id'] ?? null;
     const result = await createEvent(parsed.data, req.auth.userId, correlationId);
     if (result.outcome === 'suspended') return res.status(403).json({ error: 'tu cuenta está suspendida' });
+    if (result.outcome === 'too_many') return res.status(429).json({ error: 'llegaste al máximo de eventos publicados por día' });
     res.status(201).json(result.event);
   } catch (err) {
     next(err);
@@ -95,6 +109,10 @@ eventsRouter.get('/:id', requireAuth, async (req, res, next) => {
   try {
     const event = await findEventById(req.params.id);
     if (!event) return res.status(404).json({ error: 'evento no encontrado' });
+    // RF14: un evento oculto por moderación (o por la suspensión de su organizador) sale de la búsqueda y
+    // tampoco se sirve por enlace directo; solo lo ven su organizador y un admin.
+    const canSeeHidden = event.organizerId === req.auth.userId || req.auth.accountType === 'admin';
+    if (event.status === 'hidden' && !canSeeHidden) return res.status(404).json({ error: 'evento no encontrado' });
     res.json(event);
   } catch (err) {
     next(err);

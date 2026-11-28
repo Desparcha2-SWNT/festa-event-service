@@ -230,4 +230,84 @@ describe.skipIf(!DB || !hasContracts)('event-service con PostGIS', () => {
     expectValid('event.expired', expired[0]);
     expect((await auth(api().get('/events').query({ live: 'true' }))).body.items).toHaveLength(0);
   });
+  // ---- Auditoría de seguridad (2026-11-28) ----
+
+  const OTHER = '9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a';
+  const MERCHANT_USER = '7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d';
+  const MERCHANT_ID = '3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e';
+  const tokenFor = (sub, role = 'user') =>
+    jwt.sign({ role }, jwtPrivateKeyPem, { algorithm: 'RS256', issuer: process.env.JWT_ISSUER, subject: sub, expiresIn: '10m' });
+  const as = (sub, role) => (r) => r.set('Authorization', `Bearer ${tokenFor(sub, role)}`);
+  const createAs = (sub, role, overrides = {}) =>
+    as(sub, role)(api().post('/events')).send({
+      organizerType: 'user',
+      organizerName: 'Ana',
+      title: 'Feria de prueba',
+      description: 'Ven',
+      category: 'cultural',
+      startsAt: inHours(24),
+      endsAt: inHours(26),
+      venue: { name: 'Bloque G', address: 'Autopista Norte km 13', location: ECI },
+      ...overrides,
+    });
+
+  it('RF14: un evento oculto no se sirve por enlace directo a otro usuario, pero sí a su organizador', async () => {
+    await run('moderation.event_hidden', { eventId: futbolId, reason: 'fraude', decidedBy: ORGANIZER, decidedAt: new Date().toISOString() });
+    expect((await as(OTHER)(api().get(`/events/${futbolId}`))).status).toBe(404);
+    expect((await auth(api().get(`/events/${futbolId}`))).status).toBe(200);
+    expect((await as(OTHER, 'admin')(api().get(`/events/${futbolId}`))).status).toBe(200);
+    await run('moderation.event_restored', { eventId: futbolId, decidedBy: ORGANIZER, decidedAt: new Date().toISOString() });
+    expect((await as(OTHER)(api().get(`/events/${futbolId}`))).status).toBe(200);
+  });
+
+  it('organizerName: un comercio publica con su nombre verificado y un usuario no puede usarlo', async () => {
+    const verifiedAt = new Date(Date.now() - 60_000).toISOString();
+    await run('merchant.verified', { merchantId: MERCHANT_ID, userId: MERCHANT_USER, businessName: 'Café La Escuela', verifiedAt });
+
+    const own = await createAs(MERCHANT_USER, 'merchant', { organizerType: 'merchant', merchantId: MERCHANT_ID, organizerName: 'Otro nombre' });
+    expect(own.status).toBe(201);
+    expect(own.body.organizerName).toBe('Café La Escuela');
+
+    const fake = await createAs(OTHER, 'user', { organizerName: '  café la escuela ' });
+    expect(fake.status).toBe(409);
+  });
+
+  it('merchant.updated con verified=false revoca al comercio y un merchant.verified atrasado no lo devuelve', async () => {
+    const merchantEvent = { organizerType: 'merchant', merchantId: MERCHANT_ID, organizerName: 'x' };
+    await run('merchant.updated', {
+      merchantId: MERCHANT_ID,
+      userId: MERCHANT_USER,
+      businessName: 'Café La Escuela',
+      category: 'gastronomico',
+      place: { name: 'Bloque G', address: 'Autopista Norte km 13', location: ECI },
+      verified: false,
+      updatedAt: new Date().toISOString(),
+    });
+    expect((await createAs(MERCHANT_USER, 'merchant', merchantEvent)).status).toBe(403);
+    // Ya revocado, su nombre vuelve a estar libre para un usuario.
+    expect((await createAs(OTHER, 'user', { organizerName: 'Café La Escuela' })).status).toBe(201);
+
+    const stale = new Date(Date.now() - 3600_000).toISOString();
+    await run('merchant.verified', { merchantId: MERCHANT_ID, userId: MERCHANT_USER, businessName: 'Café La Escuela', verifiedAt: stale });
+    expect((await createAs(MERCHANT_USER, 'merchant', merchantEvent)).status).toBe(403);
+
+    await run('merchant.verified', { merchantId: MERCHANT_ID, userId: MERCHANT_USER, businessName: 'Café La Escuela', verifiedAt: new Date(Date.now() + 1000).toISOString() });
+    expect((await createAs(MERCHANT_USER, 'merchant', merchantEvent)).status).toBe(201);
+  });
+
+  it('tope diario de eventos por organizador: el siguiente responde 429 y no encola event.published', async () => {
+    const { config } = await import('../src/config.js');
+    const before = config.maxEventsPerOrganizerPerDay;
+    config.maxEventsPerOrganizerPerDay = 2;
+    try {
+      const capped = '5e4d3c2b-1a0f-4e9d-8c7b-6a5f4e3d2c1b';
+      expect((await createAs(capped, 'user')).status).toBe(201);
+      expect((await createAs(capped, 'user')).status).toBe(201);
+      const published = (await outbox('event.published')).length;
+      expect((await createAs(capped, 'user')).status).toBe(429);
+      expect((await outbox('event.published')).length).toBe(published);
+    } finally {
+      config.maxEventsPerOrganizerPerDay = before;
+    }
+  });
 });
